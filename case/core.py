@@ -60,19 +60,17 @@ def serialize_table(
     """
     Serializes a primary row and historical retrieval rows into a single, flat
     sequence of token IDs, bounded tightly by a maximum token budget.
-    
-    Public API endpoint.
     """
-    # 1. Fallback to default configuration if none provided
+    # Fallback to default configuration if none provided
     if config is None:
         raise ValueError("A valid `SerializationConfig` must be provided.")
         
-    # 2. Input Validation (Fail Fast)
+    # Input Validation (Fail Fast)
     if retrieval_table is not None and retrieval_targets is not None:
         if len(retrieval_table) != len(retrieval_targets):
             raise ValueError("Mismatched shapes: `retrieval_table` and `retrieval_targets` must have the same length.")
 
-    # 3. Determine base column/feature schema
+    # Determine base column/feature schema
     if retrieval_table is not None and not retrieval_table.empty:
         schema_series = retrieval_table.iloc[0]
     elif row is not None:
@@ -80,7 +78,7 @@ def serialize_table(
     else:
         raise ValueError("You must provide either a valid `row` or a non-empty `retrieval_table`.")
 
-    # 4. Tokenize Header Row
+    # Tokenize Header Row
     header_tokens: List[int] = []
     if config.with_header:
         header_features = pd.Series(schema_series.index, index=schema_series.index)
@@ -89,21 +87,21 @@ def serialize_table(
         target_str = _format_target_value(target_column, config, eos_token=None)
         header_tokens.extend(tokenizer(target_str)['input_ids'])
 
-    # 5. Tokenize Build Row (The primary row being processed)
-    build_row_tokens: List[int] = []
+    # Tokenize Query Row (The primary row being processed)
+    query_row_tokens: List[int] = []
     if row is not None:
-        build_row_tokens.extend(_clean_and_tokenize_series(row, tokenizer, config))
+        query_row_tokens.extend(_clean_and_tokenize_series(row, tokenizer, config))
         # Empty string target generation matching original behavior
-        build_row_tokens.extend(tokenizer('')['input_ids'])
+        query_row_tokens.extend(tokenizer('')['input_ids'])
 
     # If no historical context table is provided, return the primary sequence immediately
     if retrieval_table is None or retrieval_targets is None or retrieval_table.empty:
-        return {'input_ids': header_tokens + build_row_tokens}
+        return {'input_ids': header_tokens + query_row_tokens}
 
     # 6. Process Retrieval Context (Packing up to token budget limit)
     retrieval_sequences: List[List[int]] = []
     current_retrieval_length = 0
-    fixed_token_budget = len(header_tokens) + len(build_row_tokens)
+    fixed_token_budget = len(header_tokens) + len(query_row_tokens)
 
     # Note: Using .values or zipped arrays here avoids the huge overhead of creating pd.Series objects in a loop
     feature_rows = retrieval_table.values
@@ -127,10 +125,10 @@ def serialize_table(
         retrieval_sequences.append(current_row_tokens)
         current_retrieval_length += len(current_row_tokens)
 
-    # 7. Reverse historical context to keep closest matching context nearest to the main build row
+    # 7. Reverse historical context to keep closest matching context nearest to the main query row
     retrieval_sequences.reverse()
     flat_retrieval_tokens = [tok for seq in retrieval_sequences for tok in seq]
 
     return {
-        'input_ids': header_tokens + flat_retrieval_tokens + build_row_tokens
+        'input_ids': header_tokens + flat_retrieval_tokens + query_row_tokens
     }

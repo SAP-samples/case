@@ -28,6 +28,8 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
         scientific_notation_features: bool = True,
         normalize_embeddings: bool = False,
         batch_size: int = 16,
+        dtype: torch.dtype = torch.bfloat16,
+        attn_implementation: str = "flash_attention_2", # "eager", "sdpa", "flash_attention_3", ...
         random_state: Optional[int] = 42,
     ):
         self.model_name = model_name
@@ -38,8 +40,9 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
         self.scientific_notation_features = scientific_notation_features
         self.normalize_embeddings = normalize_embeddings
         self.batch_size = batch_size
+        self.dtype = dtype
+        self.attn_implementation = attn_implementation
         self.random_state = random_state
-        self.config = SerializationConfig(max_length=max_length)
 
         # Private internal model states
         self._model = None
@@ -54,8 +57,10 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
         self._kv_cache = DynamicCache(config=self._model.config)
         y_str = y.astype("string") if y is not None else None
 
+        config = SerializationConfig(max_length=self.max_length, with_header=True)
+
         inputs = serialize_table(
-            config=self.config,
+            config=config,
             row=None,
             retrieval_table=X,
             retrieval_targets=y_str,
@@ -78,10 +83,10 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
         if not self._kv_cache:
             return None
         
-        # 1. Create a clean deepcopy of the single-row context cache
+        # Create a clean deepcopy of the single-row context cache
         batch_cache = copy.deepcopy(self._kv_cache)
         
-        # 2. Use the standard, built-in HF tool to cleanly scale the batch dimension.
+        # Use the standard, built-in HF tool to cleanly scale the batch dimension.
         # This accurately handles keys, values, and layer-level token counters.
         if batch_size > 1:
             batch_cache.batch_repeat_interleave(batch_size)
@@ -102,13 +107,15 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
             hidden_dim = text_config.hidden_size
             return np.empty((0, 1, hidden_dim), dtype=np.float32)
 
-        # 1. Enforce right-padding for clean causal alignment
+        # Enforce right-padding for clean causal alignment
         self._tokenizer.padding_side = "right"
+
+        config = SerializationConfig(max_length=self.max_length, with_header=False)
 
         all_input_ids = []
         for unique_row_id, row in X.iterrows():
             inputs = serialize_table(
-                config=self.config,
+                config=config,
                 row=row[self._cols_to_embed_],
                 retrieval_table=None,
                 retrieval_targets=None,
@@ -126,7 +133,7 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
             range(0, n_rows, self.batch_size), desc="Embedding batches"
         )
 
-        # 2. Iterate through data batches
+        # Iterate through data batches
         for chunk_offset in progress_bar: #range(0, n_rows, self.batch_size):
             batch_inputs = all_input_ids[chunk_offset : chunk_offset + self.batch_size]
             current_batch_size = len(batch_inputs)
@@ -148,7 +155,7 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
             else:
                 past_key_values = None
 
-            # 3. Clean inference call completely absent of manual position overrides
+            # Clean inference call completely absent of manual position overrides
             with torch.no_grad():
                 outputs = self._model(
                     input_ids=input_ids,
@@ -158,7 +165,7 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
 
             last_hidden_state = outputs.hidden_states[-1]
 
-            # 4. Target Extraction: Pull hidden states using true string boundary limits
+            # Target Extraction: Pull hidden states using true string boundary limits
             for batch_idx in range(current_batch_size):
                 original_idx = chunk_offset + batch_idx
                 last_valid_token_idx = true_lengths[batch_idx] - 1
@@ -182,8 +189,8 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
             self._model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
                 device_map="auto",
-                torch_dtype=torch.bfloat16,
-                attn_implementation="flash_attention_2",
+                dtype=self.dtype,
+                attn_implementation=self.attn_implementation,
             )
             self._tokenizer = AutoTokenizer.from_pretrained(
                 self.model_name

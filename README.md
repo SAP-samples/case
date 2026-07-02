@@ -47,7 +47,7 @@ X_train = pd.DataFrame({
 })
 
 # Target variable: Continuous income baseline
-y_train = pd.Series([72000, 140000, 165000, 240000, 85000, 210000], name="income")
+y_train = pd.Series([72000, 130000, 165000, 240000, 85000, 210000], name="income")
 
 
 # --- Test Set (Out-of-Vocabulary Semantic Shift) ---
@@ -86,15 +86,15 @@ print("Predictions w/o CASE:", predictions_baseline)
 print("Predictions w/  CASE:", predictions_case)
 
 # Outputs:
-# Predictions w/o CASE: [156662.53 156662.53 156662.53]
-# Predictions w/  CASE: [117651.11 142525.2  192891.25]
+# Predictions w/o CASE: [157626.72 157626.72 157626.72]
+# Predictions w/  CASE: [101439.39 130765.45 196179.86]
 ```
 
 This example illustrates a fundamental limitation in traditional tabular learning that **CASE** solves:
 
-* **The Baseline Failure:** Standard tabular architectures lack the semantic grounding to parse raw text features. When faced with identical numerical vectors (`age=30`, `exp=10`), a standalone predictor collapses to the group mean (~$156\text{k}$), completely blind to the fact that a *Junior* and a *Principal* should occupy drastically different salary bands.
+* **The Baseline Failure:** Standard tabular architectures lack the semantic grounding to parse raw text features. When faced with identical numerical vectors (`age=30`, `exp=10`), a standalone predictor collapses to the group mean (~$157\text{k}$), completely blind to the fact that a *Junior* and a *Principal* should occupy drastically different salary bands.
 * **The CASE Advantage:** By projecting categorical and textual features into a structured, context-aware embedding space, CASE explicitly captures domain-specific hierarchies and lexical variations:
-  * **Synonym Mapping:** It reasons that `"Data Scientist II"` shares a semantic profile with the training set's `"Senior Data Scientist"`, leading to a highly accurate, generalized prediction (~$142\text{k}$).
+  * **Synonym Mapping:** It reasons that `"Data Scientist II"` shares a semantic profile with the training set's `"Senior Data Scientist"`, leading to a highly accurate, generalized prediction (~$130\text{k}$).
   * **Zero-Shot Relational Scaling:** It extracts the relative weight of prefixes like `"Junior"` and `"Principal"` against historical records, scaling the continuous target up or down realistically without ever seeing those exact string labels during training.
 
 ## Citations
