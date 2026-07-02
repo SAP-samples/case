@@ -1,0 +1,9 @@
+# Python virtual environments
+.venv/
+
+# uv cache directory
+.uv/
+
+# Standard Python compiled files
+__pycache__/
+*.pyc
