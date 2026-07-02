@@ -88,7 +88,6 @@ print("Predictions w/  CASE:", predictions_case)
 # Outputs:
 # Predictions w/o CASE: [156662.53 156662.53 156662.53]
 # Predictions w/  CASE: [117651.11 142525.2  192891.25]
-### Why CASE Matters: Resolving Semantic Blind Spots
 ```
 
 This example illustrates a fundamental limitation in traditional tabular learning that **CASE** solves:
