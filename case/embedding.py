@@ -211,9 +211,17 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
         X_df = pd.DataFrame(X).copy()
         self._load_model(X_df, y)
         raw_embs = self._embed(X=X_df, y=y)
+        n_samples = raw_embs.shape[0]
+        hidden_dim = raw_embs.shape[-1]
+
+        # Dynamic Component Guard: Prevent PCA crashes if n_samples is less than n_components
+        effective_components = min(self.n_components, n_samples, hidden_dim)
+        if effective_components < self.n_components:
+            # Drop a warning or handle gracefully if your dataset is smaller than your component settings
+            print(f"Warning: Lowering PCA components from {self.n_components} to {effective_components} due to sample size bounds.")
 
         self.pca_ = PCA(
-            n_components=self.n_components, random_state=self.random_state
+            n_components=effective_components, random_state=self.random_state
         )
         self.pca_.fit(np.squeeze(raw_embs, axis=1))
         return self
@@ -237,26 +245,26 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
         X_df = pd.DataFrame(X).copy()
         self._load_model(X_df, y)
 
-        # 1. Generate embeddings exactly once
+        # Generate embeddings exactly once
         raw_embs = self._embed(X=X_df, y=y)
         n_samples = raw_embs.shape[0]
         hidden_dim = raw_embs.shape[-1]
         squeezed_embs = np.squeeze(raw_embs, axis=1)
 
-        # 2. Dynamic Component Guard: Prevent PCA crashes if n_samples is less than n_components
+        # Dynamic Component Guard: Prevent PCA crashes if n_samples is less than n_components
         effective_components = min(self.n_components, n_samples, hidden_dim)
 
         if effective_components < self.n_components:
             # Drop a warning or handle gracefully if your dataset is smaller than your component settings
             print(f"Warning: Lowering PCA components from {self.n_components} to {effective_components} due to sample size bounds.")
 
-        # 2. Fit PCA and transform the embeddings simultaneously
+        # Fit PCA and transform the embeddings simultaneously
         self.pca_ = PCA(
             n_components=effective_components, random_state=self.random_state
         )
         embs_pca = self.pca_.fit_transform(squeezed_embs)
 
-        # 3. Format and return output
+        # Format and return output
         return pd.DataFrame(
             embs_pca,
             columns=[f"lm_pca_{i}" for i in range(embs_pca.shape[1])],
