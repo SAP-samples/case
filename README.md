@@ -64,19 +64,15 @@ X_test = pd.DataFrame({
     "company_size": ["Enterprise", "Enterprise", "Enterprise"],
 })
 
-# 1. Initialize CASE to generate context-aware semantic embeddings
-case_embedder = CaseTransformer(model_name=<MODEL_NAME>)
-X_train_case = case_embedder.fit_transform(X_train, y_train)
-X_test_case = case_embedder.transform(X_test)
-
-# 2. Baseline: Fit/Predict without CASE embeddings
+# 1. Baseline: Fit/Predict without CASE embeddings
 reg_baseline = TabICLRegressor()
 reg_baseline.fit(X_train, y_train)
 predictions_baseline = reg_baseline.predict(X_test)
 
-# 3. Enhanced: Combine raw data with CASE semantic embeddings
-X_train_enhanced = pd.concat([X_train, X_train_case], axis=1)
-X_test_enhanced = pd.concat([X_test, X_test_case], axis=1)
+# 2. Initialize CASE to generate context-aware semantic embeddings
+case_embedder = CaseTransformer(model_name=<MODEL_NAME>)
+X_train_enhanced = case_embedder.fit_transform(X_train, y_train)
+X_test_enhanced = case_embedder.transform(X_test)
 
 reg_case = TabICLRegressor()
 reg_case.fit(X_train_enhanced, y_train)

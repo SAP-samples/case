@@ -1,6 +1,6 @@
 import copy
 import random
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -16,7 +16,31 @@ from case.core import serialize_table
 
 
 class CaseTransformer(BaseEstimator, TransformerMixin):
-    """A scikit-learn transformer that generates text embeddings for tabular data."""
+    """A scikit-learn transformer that generates context-aware semantic embeddings 
+    for tabular data by serializing tables for LLM processing.
+
+    This estimator converts tabular inputs into structured token sequences,
+    optionally builds in-context historical retrieval frames, and extracts hidden state
+    representations from a transformer backbone. The final multi-dimensional embeddings
+    are reduced using an internal PCA projection layer to fit standard downstream tasks.
+
+    Attributes:
+        model_name (str): Identifier or local path of the Hugging Face transformer backbone.
+        max_length (int): The absolute maximum token sequence length budget for context sequences.
+        num_context_rows (int): The maximum number of context rows to ingest during in-context serialization.
+        n_components (int): Target feature dimension size for the internal PCA reduction layer.
+        scientific_notation (bool): If True, formats numerical target vectors into standardized 
+            scientific notation strings.
+        normalize_embeddings (bool): If True, applies an L2 normalization step to the generated 
+            embeddings before PCA reduction.
+        batch_size (int): Size of chunks to slice and feed into the transformer model during inference loops.
+        dtype (torch.dtype): Target precision datatype utilized for model weight allocations.
+        attn_implementation (str): Attention optimization backend to load (e.g., "flash_attention_2", "sdpa").
+        random_state (Optional[int]): Seed value utilized to guarantee deterministic PCA decomposition.
+        append_original_features (bool): If True, the original input features (features passed into `X`) are 
+            horizontally concatenated side-by-side with the newly generated language model PCA features in the 
+            final returned DataFrame. If False, only the `lm_pca_x` components are returned. Defaults to True.
+    """
 
     def __init__(
         self,
@@ -25,30 +49,30 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
         num_context_rows: int = 128,
         n_components: int = 32,
         scientific_notation: bool = True,
-        scientific_notation_features: bool = True,
         normalize_embeddings: bool = False,
         batch_size: int = 16,
         dtype: torch.dtype = torch.bfloat16,
-        attn_implementation: str = "flash_attention_2", # "eager", "sdpa", "flash_attention_3", ...
+        attn_implementation: str = "flash_attention_2",
         random_state: Optional[int] = 42,
+        append_original_features: bool = True,
     ):
         self.model_name = model_name
         self.max_length = max_length
         self.num_context_rows = num_context_rows
         self.n_components = n_components
         self.scientific_notation = scientific_notation
-        self.scientific_notation_features = scientific_notation_features
         self.normalize_embeddings = normalize_embeddings
         self.batch_size = batch_size
         self.dtype = dtype
         self.attn_implementation = attn_implementation
         self.random_state = random_state
+        self.append_original_features = append_original_features
 
         # Private internal model states
-        self._model = None
-        self._tokenizer = None
-        self._kv_cache = None
-        self._device = None
+        self._model: Any = None
+        self._tokenizer: Any = None
+        self._kv_cache: Any = None
+        self._device: Optional[str] = None
 
     def _prefill_kv(
         self, X: pd.DataFrame, y: Optional[pd.Series] = None
@@ -180,7 +204,7 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
 
         return final_embeddings
 
-    def _load_model(self, X: pd.DataFrame, y: Optional[pd.Series]) -> None:
+    def _setup_model(self, X: pd.DataFrame, y: Optional[pd.Series]) -> None:
         """Lazy initialization of the LLM and tokenizer configuration."""
         self.target_column_name_ = y.name if y is not None else "target"
         self._cols_to_embed_ = X.columns
@@ -216,7 +240,7 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
     ) -> "CaseTransformer":
         """Fits the transformer by passing data through the LLM and training PCA."""
         X_df = pd.DataFrame(X).copy()
-        self._load_model(X_df, y)
+        self._setup_model(X_df, y)
         raw_embs = self._embed(X=X_df, y=y)
         n_samples = raw_embs.shape[0]
         hidden_dim = raw_embs.shape[-1]
@@ -239,18 +263,24 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
         raw_embs = self._embed(X=X_df, y=None)
         embs_pca = self.pca_.transform(np.squeeze(raw_embs, axis=1))
 
-        return pd.DataFrame(
+        pca_df = pd.DataFrame(
             embs_pca,
             columns=[f"lm_pca_{i}" for i in range(embs_pca.shape[1])],
             index=X_df.index,
         )
+
+        # Conditionally concatenate original features
+        if self.append_original_features:
+            return pd.concat([X_df, pca_df], axis=1)
+            
+        return pca_df
 
     def fit_transform(
         self, X: Union[pd.DataFrame, np.ndarray], y: Optional[pd.Series] = None, **fit_params
     ) -> pd.DataFrame:
         """Optimized fit_transform that runs LLM inference exactly once to avoid heavy recalculations."""
         X_df = pd.DataFrame(X).copy()
-        self._load_model(X_df, y)
+        self._setup_model(X_df, y)
 
         # Generate embeddings exactly once
         raw_embs = self._embed(X=X_df, y=y)
@@ -258,22 +288,24 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
         hidden_dim = raw_embs.shape[-1]
         squeezed_embs = np.squeeze(raw_embs, axis=1)
 
-        # Dynamic Component Guard: Prevent PCA crashes if n_samples is less than n_components
+        # Dynamic Component Guard
         effective_components = min(self.n_components, n_samples, hidden_dim)
 
         if effective_components < self.n_components:
-            # Drop a warning or handle gracefully if your dataset is smaller than your component settings
             print(f"Warning: Lowering PCA components from {self.n_components} to {effective_components} due to sample size bounds.")
 
-        # Fit PCA and transform the embeddings simultaneously
-        self.pca_ = PCA(
-            n_components=effective_components, random_state=self.random_state
-        )
+        # Fit PCA and transform simultaneously
+        self.pca_ = PCA(n_components=effective_components, random_state=self.random_state)
         embs_pca = self.pca_.fit_transform(squeezed_embs)
 
-        # Format and return output
-        return pd.DataFrame(
+        pca_df = pd.DataFrame(
             embs_pca,
             columns=[f"lm_pca_{i}" for i in range(embs_pca.shape[1])],
             index=X_df.index,
         )
+
+        # Conditionally concatenate original features
+        if self.append_original_features:
+            return pd.concat([X_df, pca_df], axis=1)
+
+        return pca_df

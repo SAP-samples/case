@@ -4,6 +4,7 @@ import pandas as pd
 
 from case.config import SerializationConfig
 
+
 def _clean_and_tokenize_series(
     series: pd.Series, 
     tokenizer: Any, 
@@ -11,22 +12,28 @@ def _clean_and_tokenize_series(
 ) -> List[int]:
     """
     Cleans an entire pandas Series and serializes it into a flat list of token IDs.
-    Vectorizes string cleaning for a massive speedup over element-by-element looping.
     """
-    # Vectorized cleaning: replace tabs, newlines, and quad-spaces across the Series
-    cleaned_series = (
+    # Vectorized cleaning across the Series
+    cleaned_strings: List[str] = (
         series.fillna('')
         .astype(str)
         .str.replace(r'[\t\n\r]|    ', '', regex=True)
+        .tolist()
     )
     
-    token_ids: List[int] = []
+    if not cleaned_strings:
+        return []
+    
+    # Vectorized Batch Tokenization
+    batch_outputs = tokenizer(cleaned_strings, add_special_tokens=False)['input_ids']
     separator_tokens = tokenizer(config.cell_separator, add_special_tokens=False)['input_ids']
     
-    # Tokenize each cell and apply max length constraint per cell
-    for value in cleaned_series:
-        cell_tokens = tokenizer(value, add_special_tokens=False)['input_ids']
-        token_ids.extend(cell_tokens[:config.max_cell_tokens])
+    # Efficient Flattening with Constraints
+    token_ids: List[int] = []
+    max_tokens = config.max_cell_tokens
+    
+    for cell_tokens in batch_outputs:
+        token_ids.extend(cell_tokens[:max_tokens])
         token_ids.extend(separator_tokens)
         
     return token_ids
@@ -63,7 +70,7 @@ def serialize_table(
     """
     # Fallback to default configuration if none provided
     if config is None:
-        raise ValueError("A valid `SerializationConfig` must be provided.")
+        config = SerializationConfig()
         
     # Input Validation (Fail Fast)
     if retrieval_table is not None and retrieval_targets is not None:
