@@ -1,3 +1,5 @@
+from typing import Any
+
 import pandas as pd
 import pytest
 
@@ -7,14 +9,26 @@ from case.core import serialize_table
 
 # A minimal mock tokenizer to keep unit tests lightning fast and offline-friendly
 class DummyTokenizer:
-    @property
-    def eos_token(self):
-        return '</s>'
+    def __init__(self):
+        # Add the missing attributes expected by the serialization logic
+        self.eos_token = '</s>'
+        self.pad_token = '<pad>'
+        self.bos_token = '<s>'
 
-    def __call__(self, text: str, add_special_tokens: bool = False, **kwargs):
-        # Simply returns a list of integer IDs mapping to the character length of words
-        tokens = [len(word) if word else 1 for word in text.split()]
-        return {'input_ids': tokens if tokens else [0]}
+    def __call__(self, text: Any, add_special_tokens: bool = False, **kwargs):
+        # Handle batch input (list of strings)
+        if isinstance(text, list):
+            batch_ids = []
+            for item in text:
+                words = str(item).split()
+                tokens = [len(word) if word else 1 for word in words]
+                batch_ids.append(tokens)
+            return {'input_ids': batch_ids}
+
+        # Handle single string input
+        words = str(text).split()
+        tokens = [len(word) if word else 1 for word in words]
+        return {'input_ids': tokens}
 
 
 @pytest.fixture
