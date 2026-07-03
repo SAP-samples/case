@@ -51,7 +51,7 @@ y_train = pd.Series([72000, 130000, 165000, 240000, 85000, 210000], name="income
 
 
 # --- Test Set (Out-of-Vocabulary Semantic Shift) ---
-# Force identical numerical features, but introduce a clear semantic hierarchy 
+# Force identical numerical features, but introduce a clear semantic hierarchy
 # completely unseen during training.
 X_test = pd.DataFrame({
     "age": [30.0, 30.0, 30.0],

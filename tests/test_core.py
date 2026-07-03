@@ -1,31 +1,32 @@
-import pytest
 import pandas as pd
+import pytest
+
 from case.config import SerializationConfig
 from case.core import serialize_table
+
 
 # A minimal mock tokenizer to keep unit tests lightning fast and offline-friendly
 class DummyTokenizer:
     @property
     def eos_token(self):
-        return "</s>"
-        
+        return '</s>'
+
     def __call__(self, text: str, add_special_tokens: bool = False, **kwargs):
         # Simply returns a list of integer IDs mapping to the character length of words
         tokens = [len(word) if word else 1 for word in text.split()]
-        return {"input_ids": tokens if tokens else [0]}
+        return {'input_ids': tokens if tokens else [0]}
+
 
 @pytest.fixture
 def dummy_tokenizer():
     return DummyTokenizer()
 
+
 @pytest.fixture
 def sample_data():
-    row = pd.Series({"age": "30", "score": "95.5"})
-    retrieval_table = pd.DataFrame([
-        {"age": "25", "score": "88.0"},
-        {"age": "40", "score": "100.0"}
-    ])
-    retrieval_targets = pd.Series(["A", "B"])
+    row = pd.Series({'age': '30', 'score': '95.5'})
+    retrieval_table = pd.DataFrame([{'age': '25', 'score': '88.0'}, {'age': '40', 'score': '100.0'}])
+    retrieval_targets = pd.Series(['A', 'B'])
     return row, retrieval_table, retrieval_targets
 
 
@@ -33,67 +34,68 @@ def test_serialize_table_basic(dummy_tokenizer, sample_data):
     """Ensure table serialization runs and produces expected dictionary structure."""
     row, retrieval_table, retrieval_targets = sample_data
     config = SerializationConfig(max_length=100, with_header=True)
-    
+
     result = serialize_table(
-        target_column="score",
+        target_column='score',
         tokenizer=dummy_tokenizer,
         row=row,
         retrieval_table=retrieval_table,
         retrieval_targets=retrieval_targets,
-        config=config
+        config=config,
     )
-    
-    assert "input_ids" in result
-    assert isinstance(result["input_ids"], list)
-    assert all(isinstance(i, int) for i in result["input_ids"])
+
+    assert 'input_ids' in result
+    assert isinstance(result['input_ids'], list)
+    assert all(isinstance(i, int) for i in result['input_ids'])
+
 
 def test_serialize_table_budget_truncation(dummy_tokenizer, sample_data):
     """Verify that retrieval rows are dropped if they exceed max_length budget."""
     row, retrieval_table, retrieval_targets = sample_data
-    
-    # Capture the unconstrained baseline length 
+
+    # Capture the unconstrained baseline length
     large_config = SerializationConfig(max_length=1000, with_header=True)
     full_result = serialize_table(
-        target_column="score",
+        target_column='score',
         tokenizer=dummy_tokenizer,
         row=row,
         retrieval_table=retrieval_table,
         retrieval_targets=retrieval_targets,
-        config=large_config
+        config=large_config,
     )
-    full_length = len(full_result["input_ids"])
-    
+    full_length = len(full_result['input_ids'])
+
     # Assign an isolated budget target that allows the primary row block through,
     # but strictly triggers context historical truncations.
     strict_budget = max(15, full_length - 5)
     strict_config = SerializationConfig(max_length=strict_budget, with_header=True)
-    
+
     truncated_result = serialize_table(
-        target_column="score",
+        target_column='score',
         tokenizer=dummy_tokenizer,
         row=row,
         retrieval_table=retrieval_table,
         retrieval_targets=retrieval_targets,
-        config=strict_config
+        config=strict_config,
     )
-    
+
     # Enforce safe upper bounds
-    assert len(truncated_result["input_ids"]) <= strict_budget
+    assert len(truncated_result['input_ids']) <= strict_budget
 
 
 def test_serialize_table_mismatched_inputs(dummy_tokenizer, sample_data):
     """Enforce fast-failing input validations."""
     row, retrieval_table, _ = sample_data
     config = SerializationConfig(max_length=100)
-    
-    invalid_targets = pd.Series(["OnlyOneTarget"]) # Length mismatch with retrieval_table (2 rows)
-    
-    with pytest.raises(ValueError, match="Mismatched shapes"):
+
+    invalid_targets = pd.Series(['OnlyOneTarget'])  # Length mismatch with retrieval_table (2 rows)
+
+    with pytest.raises(ValueError, match='Mismatched shapes'):
         serialize_table(
-            target_column="score",
+            target_column='score',
             tokenizer=dummy_tokenizer,
             row=row,
             retrieval_table=retrieval_table,
             retrieval_targets=invalid_targets,
-            config=config
+            config=config,
         )
