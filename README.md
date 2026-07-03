@@ -20,6 +20,19 @@ state of the art when combined with recent tabular in-context learners.
 
 ![logo](./case_arch.png)
 
+## ⚖️ Model Availability & Legal Status
+
+The core codebase for CASE is fully open-source and functional. However, our custom-tuned Tabular Language Model checkpoints (optimized specifically for tabular predictions) are currently undergoing internal compliance reviews. We anticipate releasing these tuned weights on HuggingFace shortly.
+
+### Running with Off-the-Shelf Models (Functional Fallback)
+In the meantime, the architecture is designed to be completely model-agnostic. You can run the pipeline immediately using standard, off-the-shelf causal LLMs.
+
+> ⚠️ **Important Note on Performance:** While standard models are **functionally identical** and will run through the pipeline without error, they generally lack the specialized tuning required to extract deep semantic embeddings from dense tabular formats. Expect a drop in predictive quality on downstream tabular learners compared to the benchmarks reported in the paper until the custom weights are cleared.
+
+Recommended models to try right now:
+*   `google/gemma-3-4b-pt` (Highly recommended)
+*   `google/gemma-3-1b-it` (Great for fast local testing and low-VRAM settings)
+
 ## Quickstart & Example
 
 `case` provides a familiar, `scikit-learn`-compatible transformer interface to extract context-aware semantic embeddings from tabular features, allowing downstream tabular learners to leverage LLM world knowledge.
@@ -70,7 +83,7 @@ reg_baseline.fit(X_train, y_train)
 predictions_baseline = reg_baseline.predict(X_test)
 
 # 2. Initialize CASE to generate context-aware semantic embeddings
-case_embedder = CaseTransformer(model_name=<MODEL_NAME>)
+case_embedder = CaseTransformer(model_name="google/gemma-3-4b-pt")
 X_train_enhanced = case_embedder.fit_transform(X_train, y_train)
 X_test_enhanced = case_embedder.transform(X_test)
 
@@ -88,8 +101,8 @@ print("Predictions w/  CASE:", predictions_case)
 
 This example illustrates a fundamental limitation in traditional tabular learning that **CASE** solves:
 
-* **The Baseline Failure:** Standard tabular architectures lack the semantic grounding to parse raw text features. When faced with identical numerical vectors (`age=30`, `exp=10`), a standalone predictor collapses to the group mean (~$157\text{k}$), completely blind to the fact that a *Junior* and a *Principal* should occupy drastically different salary bands.
-* **The CASE Advantage:** By projecting categorical and textual features into a structured, context-aware embedding space, CASE explicitly captures domain-specific hierarchies and lexical variations:
+* **Baseline Failure:** Standard tabular architectures lack the semantic grounding to parse raw text features. When faced with identical numerical vectors (`age=30`, `exp=10`), a standalone predictor collapses to the group mean (~$157\text{k}$), completely blind to the fact that a *Junior* and a *Principal* should occupy drastically different salary bands.
+* **CASE Advantage:** By projecting categorical and textual features into a structured, context-aware embedding space, CASE explicitly captures domain-specific hierarchies and lexical variations:
   * **Synonym Mapping:** It reasons that `"Data Scientist II"` shares a semantic profile with the training set's `"Senior Data Scientist"`, leading to a highly accurate, generalized prediction (~$130\text{k}$).
   * **Zero-Shot Relational Scaling:** It extracts the relative weight of prefixes like `"Junior"` and `"Principal"` against historical records, scaling the continuous target up or down realistically without ever seeing those exact string labels during training.
 
