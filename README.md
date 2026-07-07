@@ -110,7 +110,14 @@ This example illustrates a fundamental limitation in traditional tabular learnin
 
 If you use CASE in your research or want to refer to our work, please cite:
 ```
-#TODO
+@inproceedings{
+case,
+title={Enhancing Tabular Learners with Context-Aware Semantic Embeddings},
+author={Günther Schindler and Maximilian Schambach and Johannes Höhne},
+booktitle={2nd ICML Workshop on Foundation Models for Structured Data},
+year={2026},
+url={https://openreview.net/forum?id=QArxQg4U71}
+}
 ```
 
 ## How to obtain support
