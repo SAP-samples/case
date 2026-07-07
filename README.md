@@ -101,16 +101,23 @@ print("Predictions w/  CASE:", predictions_case)
 
 This example illustrates a fundamental limitation in traditional tabular learning that **CASE** solves:
 
-* **Baseline Failure:** Standard tabular architectures lack the semantic grounding to parse raw text features. When faced with identical numerical vectors (`age=30`, `exp=10`), a standalone predictor collapses to the group mean (~$157\text{k}$), completely blind to the fact that a *Junior* and a *Principal* should occupy drastically different salary bands.
+* **Baseline Failure:** Standard tabular architectures lack the semantic grounding to parse raw text features. When faced with identical numerical vectors (`age=30`, `exp=10`), a standalone predictor collapses to the group mean (~157k), completely blind to the fact that a *Junior* and a *Principal* should occupy drastically different salary bands.
 * **CASE Advantage:** By projecting categorical and textual features into a structured, context-aware embedding space, CASE explicitly captures domain-specific hierarchies and lexical variations:
-  * **Synonym Mapping:** It reasons that `"Data Scientist II"` shares a semantic profile with the training set's `"Senior Data Scientist"`, leading to a highly accurate, generalized prediction (~$130\text{k}$).
+  * **Synonym Mapping:** It reasons that `"Data Scientist II"` shares a semantic profile with the training set's `"Senior Data Scientist"`, leading to a highly accurate, generalized prediction (~130k).
   * **Zero-Shot Relational Scaling:** It extracts the relative weight of prefixes like `"Junior"` and `"Principal"` against historical records, scaling the continuous target up or down realistically without ever seeing those exact string labels during training.
 
 ## Citations
 
 If you use CASE in your research or want to refer to our work, please cite:
 ```
-#TODO
+@inproceedings{
+case,
+title={Enhancing Tabular Learners with Context-Aware Semantic Embeddings},
+author={Günther Schindler and Maximilian Schambach and Johannes Höhne},
+booktitle={2nd ICML Workshop on Foundation Models for Structured Data},
+year={2026},
+url={https://openreview.net/forum?id=QArxQg4U71}
+}
 ```
 
 ## How to obtain support
