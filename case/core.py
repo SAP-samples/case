@@ -90,6 +90,18 @@ def serialize_table(
         # Empty string target generation matching original behavior
         query_row_tokens.extend(tokenizer('')['input_ids'])
 
+    # Ensure header + query row alone do not violate config.max_length
+    combined_primary_len = len(header_tokens) + len(query_row_tokens)
+    if combined_primary_len > config.max_length:
+        # If headers alone exceed max_length, truncate them first
+        if len(header_tokens) >= config.max_length:
+            header_tokens = header_tokens[: config.max_length]
+            query_row_tokens = []
+        else:
+            # Keep header intact, truncate query row to fit remaining budget
+            allowed_query_len = config.max_length - len(header_tokens)
+            query_row_tokens = query_row_tokens[:allowed_query_len]
+
     # If no historical context table is provided, return the primary sequence immediately
     if retrieval_table is None or retrieval_targets is None or retrieval_table.empty:
         return {'input_ids': header_tokens + query_row_tokens}
