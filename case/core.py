@@ -138,3 +138,17 @@ def serialize_table(
     flat_retrieval_tokens = [tok for seq in retrieval_sequences for tok in seq]
 
     return {'input_ids': header_tokens + flat_retrieval_tokens + query_row_tokens}
+
+
+def get_constant_columns(X: pd.DataFrame):
+    """Get constant columns of DataFrame."""
+    constant_cols = []
+    for col in X.columns:
+        # Get unique values, excluding NaNs for a moment
+        unique_values = X[col].unique()
+
+        # Only 1 unique value exists (including NaNs/Empty Strings)
+        if len(unique_values) <= 1:
+            constant_cols.append(col)
+
+    return constant_cols

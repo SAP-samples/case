@@ -12,7 +12,7 @@ from tqdm import tqdm
 from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
 
 from case.config import SerializationConfig
-from case.core import serialize_table
+from case.core import get_constant_columns, serialize_table
 
 
 class CaseTransformer(BaseEstimator, TransformerMixin):
@@ -73,6 +73,7 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
         self._tokenizer: Any = None
         self._kv_cache: Any = None
         self._device: Optional[str] = None
+        self.constant_columns = None
 
     def _prefill_kv(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> None:
         """Prefills the KV Cache with context rows to guide the LLM."""
@@ -222,6 +223,12 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
     def fit(self, X: Union[pd.DataFrame, np.ndarray], y: Optional[pd.Series] = None) -> 'CaseTransformer':
         """Fits the transformer by passing data through the LLM and training PCA."""
         X_df = pd.DataFrame(X).copy()
+        self.constant_columns = get_constant_columns(X)
+        # Drop constant columns
+        self.constant_columns = get_constant_columns(X_df)
+        if len(self.constant_columns) > 0:
+            X_df = X_df.drop(columns=self.constant_columns)
+
         self._setup_model(X_df, y)
         raw_embs = self._embed(X=X_df, y=y)
         n_samples = raw_embs.shape[0]
@@ -242,6 +249,10 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
     def transform(self, X: Union[pd.DataFrame, np.ndarray]) -> pd.DataFrame:
         """Transforms out-of-sample data into low-dimensional embeddings."""
         X_df = pd.DataFrame(X).copy()
+        # Drop constant columns
+        if len(self.constant_columns) > 0:
+            X_df = X_df.drop(columns=self.constant_columns)
+
         raw_embs = self._embed(X=X_df, y=None)
         embs_pca = self.pca_.transform(np.squeeze(raw_embs, axis=1))
 
@@ -262,6 +273,11 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
     ) -> pd.DataFrame:
         """Optimized fit_transform that runs LLM inference exactly once to avoid heavy recalculations."""
         X_df = pd.DataFrame(X).copy()
+        # Drop constant columns
+        self.constant_columns = get_constant_columns(X_df)
+        if len(self.constant_columns) > 0:
+            X_df = X_df.drop(columns=self.constant_columns)
+
         self._setup_model(X_df, y)
 
         # Generate embeddings exactly once
