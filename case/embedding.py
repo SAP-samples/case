@@ -1,4 +1,5 @@
 import copy
+import gc
 import random
 from typing import Any, Optional, Union
 
@@ -40,6 +41,8 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
         append_original_features (bool): If True, the original input features (features passed into `X`) are
             horizontally concatenated side-by-side with the newly generated language model PCA features in the
             final returned DataFrame. If False, only the `lm_pca_x` components are returned. Defaults to True.
+        offload_to_cpu (bool): If True, dynamically transfers model weights and the KV Cache to the CPU
+            and clears the CUDA VRAM cache immediately after inference tasks conclude. Defaults to True.
     """
 
     def __init__(
@@ -55,6 +58,7 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
         attn_implementation: str = 'flash_attention_2',
         random_state: Optional[int] = 42,
         append_original_features: bool = True,
+        offload_to_cpu: bool = True,
     ):
         self.model_name = model_name
         self.max_length = max_length
@@ -67,6 +71,7 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
         self.attn_implementation = attn_implementation
         self.random_state = random_state
         self.append_original_features = append_original_features
+        self.offload_to_cpu = offload_to_cpu
 
         # Private internal model states
         self._model: Any = None
@@ -74,6 +79,20 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
         self._kv_cache: Any = None
         self._device: Optional[str] = None
         self.constant_columns = None
+
+    def _move_to_device(self, device: Union[str, torch.device]) -> None:
+        """Helper to move the main LLM and its active KV Cache to a specific device."""
+        if self._model is not None:
+            self._model.to(device)
+
+        # HuggingFace DynamicCache stores key and value tensors layer-wise in lists
+        if self._kv_cache is not None:
+            if hasattr(self._kv_cache, 'key_cache'):
+                for i in range(len(self._kv_cache.key_cache)):
+                    self._kv_cache.key_cache[i] = self._kv_cache.key_cache[i].to(device)
+            if hasattr(self._kv_cache, 'value_cache'):
+                for i in range(len(self._kv_cache.value_cache)):
+                    self._kv_cache.value_cache[i] = self._kv_cache.value_cache[i].to(device)
 
     def _prefill_kv(self, X: pd.DataFrame, y: Optional[pd.Series] = None) -> None:
         """Prefills the KV Cache with context rows to guide the LLM."""
@@ -148,6 +167,10 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
         final_embeddings = np.zeros((n_rows, 1, hidden_dim), dtype=np.float32)
         past_seq_len = self._kv_cache.get_seq_length() if self._kv_cache else 0
 
+        # VRAM OPTIMIZATION: Move LLM & Prefilled cache back to Active GPU
+        if self.offload_to_cpu:
+            self._move_to_device(self._device)
+
         progress_bar = tqdm(range(0, n_rows, self.batch_size), desc='Embedding batches')
 
         # Iterate through data batches
@@ -191,6 +214,13 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
             normalized_2d = normalize(reshaped_embs, norm='l2')
             final_embeddings = normalized_2d.reshape(final_embeddings.shape)
 
+        # VRAM OPTIMIZATION: Dynamically clean GPU VRAM
+        if self.offload_to_cpu:
+            self._move_to_device('cpu')
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
         return final_embeddings
 
     def _setup_model(self, X: pd.DataFrame, y: Optional[pd.Series]) -> None:
@@ -212,6 +242,10 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
             self._tokenizer.padding_side = 'right'
 
             self._device = next(self._model.parameters()).device
+
+        # If model is on CPU (due to prior offloading), temporarily bring it to target GPU for cache initialization
+        if self.offload_to_cpu:
+            self._move_to_device(self._device)
 
         if self.num_context_rows > 0 and self._kv_cache is None:
             rng = random.Random(self.random_state)
