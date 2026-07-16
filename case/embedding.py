@@ -57,8 +57,10 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
         dtype: torch.dtype = torch.bfloat16,
         attn_implementation: str = 'flash_attention_2',
         random_state: Optional[int] = 42,
+        random_state_context: Optional[int] = 42,
         append_original_features: bool = True,
         offload_to_cpu: bool = True,
+        unload_after_use: bool = True,  # New: Unloads model from RAM when idle
     ):
         self.model_name = model_name
         self.max_length = max_length
@@ -70,8 +72,10 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
         self.dtype = dtype
         self.attn_implementation = attn_implementation
         self.random_state = random_state
+        self.random_state_context = random_state_context
         self.append_original_features = append_original_features
         self.offload_to_cpu = offload_to_cpu
+        self.unload_after_use = unload_after_use
 
         # Private internal model states
         self._model: Any = None
@@ -248,7 +252,7 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
             self._move_to_device(self._device)
 
         if self.num_context_rows > 0 and self._kv_cache is None:
-            rng = random.Random(self.random_state)
+            rng = random.Random(self.random_state_context)
             sampled_indices = rng.sample(range(len(X)), min(len(X), self.num_context_rows))
             X_context = X.iloc[sampled_indices]
             y_context = y.iloc[sampled_indices] if y is not None else None
