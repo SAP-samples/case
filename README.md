@@ -1,3 +1,5 @@
+[![REUSE status](https://api.reuse.software/badge/github.com/SAP-samples/case)](https://api.reuse.software/info/github.com/SAP-samples/case)
+
 # CASE: Context-Aware Semantic Embeddings
 Inference code described in the paper ["Enhancing Tabular Learners with
 Context-Aware Semantic Embeddings"](TODO).
