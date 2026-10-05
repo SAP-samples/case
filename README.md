@@ -4,6 +4,9 @@
 Inference code described in the paper ["Enhancing Tabular Learners with
 Context-Aware Semantic Embeddings"](TODO).
 
+> [!WARNING]
+> Currently, the model checkpoints used in our paper are undergoing legal compliance reviews. The code below uses off-the-shelf Gemma models, not our custom-trained tabular language model checkpoints. Hence, results obtained with the current code base are not comparable with the official CASE performance.
+
 ## Abstract
 While modern tabular learners excel at capturing statistical patterns, they frequently
 operate in a semantic vacuum, treating textual features as discrete symbols, ignoringing the rich semantics inherent in feature names or cell entries. We propose
