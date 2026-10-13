@@ -2,10 +2,24 @@
 
 # CASE: Context-Aware Semantic Embeddings
 Inference code described in the paper ["Enhancing Tabular Learners with
-Context-Aware Semantic Embeddings"](TODO).
+Context-Aware Semantic Embeddings"](https://arxiv.org/abs/2608.03565).
 
 > [!WARNING]
 > Currently, the model checkpoints used in our paper are undergoing legal compliance reviews. The code below uses off-the-shelf Gemma models, not our custom-trained tabular language model checkpoints. Hence, results obtained with the current code base are not comparable with the official CASE performance.
+
+## Citation
+
+If you use CASE in your research or want to refer to our work, please cite:
+```
+@inproceedings{
+    case,
+    title={Enhancing Tabular Learners with Context-Aware Semantic Embeddings},
+    author={Günther Schindler and Maximilian Schambach and Johannes Höhne},
+    booktitle={Advances in Neural Information Processing Systems},
+    year={2026},
+    url={https://arxiv.org/abs/2608.03565}
+}
+```
 
 ## Abstract
 While modern tabular learners excel at capturing statistical patterns, they frequently
@@ -111,19 +125,6 @@ This example illustrates a fundamental limitation in traditional tabular learnin
   * **Synonym Mapping:** It reasons that `"Data Scientist II"` shares a semantic profile with the training set's `"Senior Data Scientist"`, leading to a highly accurate, generalized prediction (~130k).
   * **Zero-Shot Relational Scaling:** It extracts the relative weight of prefixes like `"Junior"` and `"Principal"` against historical records, scaling the continuous target up or down realistically without ever seeing those exact string labels during training.
 
-## Citations
-
-If you use CASE in your research or want to refer to our work, please cite:
-```
-@inproceedings{
-case,
-title={Enhancing Tabular Learners with Context-Aware Semantic Embeddings},
-author={Günther Schindler and Maximilian Schambach and Johannes Höhne},
-booktitle={2nd ICML Workshop on Foundation Models for Structured Data},
-year={2026},
-url={https://openreview.net/forum?id=QArxQg4U71}
-}
-```
 
 ## How to obtain support
 [Create an issue](https://github.com/SAP-samples/case/issues) in this repository if you find a bug or have questions about the content.
