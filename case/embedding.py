@@ -1,6 +1,7 @@
 import copy
 import random
 from typing import Any, Optional, Union
+import logging
 
 import numpy as np
 import pandas as pd
@@ -13,6 +14,21 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, DynamicCache
 
 from case.config import SerializationConfig
 from case.core import serialize_table
+
+logger = logging.getLogger(__name__)
+
+
+def _resolve_attn_implementation() -> str:
+    """Selects the best available attention backend.
+
+    Returns 'flash_attention_2' if the flash-attn package is installed.
+    Otherwise, returns 'sdpa', which is built into PyTorch.
+    """
+    import importlib.util
+
+    if importlib.util.find_spec('flash_attn') is not None:
+        return 'flash_attention_2'
+    return 'sdpa'
 
 
 class CaseTransformer(BaseEstimator, TransformerMixin):
@@ -35,7 +51,9 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
             embeddings before PCA reduction.
         batch_size (int): Size of chunks to slice and feed into the transformer model during inference loops.
         dtype (torch.dtype): Target precision datatype utilized for model weight allocations.
-        attn_implementation (str): Attention optimization backend to load (e.g., "flash_attention_2", "sdpa").
+        attn_implementation (Optional[str]): Attention optimization backend to load (e.g., "flash_attention_2", "sdpa").
+            If None, the backend is auto-detected. "flash_attention_2" is used if the flash-attn package is
+            installed. Otherwise, "sdpa" is used.
         random_state (Optional[int]): Seed value utilized to guarantee deterministic PCA decomposition.
         append_original_features (bool): If True, the original input features (features passed into `X`) are
             horizontally concatenated side-by-side with the newly generated language model PCA features in the
@@ -44,7 +62,7 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
 
     def __init__(
         self,
-        model_name: str,
+        model_name: str = "SAP/CASE",
         max_length: int = 16_000,
         num_context_rows: int = 128,
         n_components: int = 32,
@@ -52,7 +70,7 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
         normalize_embeddings: bool = False,
         batch_size: int = 16,
         dtype: torch.dtype = torch.bfloat16,
-        attn_implementation: str = 'flash_attention_2',
+        attn_implementation: Optional[str] = None,
         random_state: Optional[int] = 42,
         append_original_features: bool = True,
     ):
@@ -168,7 +186,7 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
                 past_key_values = None
 
             # Clean inference call completely absent of manual position overrides
-            with torch.no_grad():
+            with torch.inference_mode():
                 outputs = self._model(
                     input_ids=input_ids,
                     past_key_values=past_key_values,
@@ -198,11 +216,15 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
         self._cols_to_embed_ = X.columns
 
         if self._model is None:
+            attn_implementation = self.attn_implementation
+            if attn_implementation is None:
+                attn_implementation = _resolve_attn_implementation()
+
             self._model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
                 device_map='auto',
                 dtype=self.dtype,
-                attn_implementation=self.attn_implementation,
+                attn_implementation=attn_implementation,
             )
             self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
 
@@ -219,6 +241,13 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
             y_context = y.iloc[sampled_indices] if y is not None else None
             self._prefill_kv(X_context, y_context)
 
+    def embed(self, X: pd.DataFrame) -> np.ndarray:
+        """Create contextualized embeddings for all rows in X based on the context provided during fit().
+
+        Returns embeddings of shape (num_samples, hidden_dim).
+        """
+        return self._embed(X=X, y=None).squeeze(1)
+
     def fit(self, X: Union[pd.DataFrame, np.ndarray], y: Optional[pd.Series] = None) -> 'CaseTransformer':
         """Fits the transformer by passing data through the LLM and training PCA."""
         X_df = pd.DataFrame(X).copy()
@@ -231,8 +260,8 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
         effective_components = min(self.n_components, n_samples, hidden_dim)
         if effective_components < self.n_components:
             # Drop a warning or handle gracefully if your dataset is smaller than your component settings
-            print(
-                f'Warning: Lowering PCA components from {self.n_components} to {effective_components} due to sample size bounds.'
+            logger.info(
+                f'Lowering PCA components from {self.n_components} to {effective_components} due to sample size bounds.'
             )
 
         self.pca_ = PCA(n_components=effective_components, random_state=self.random_state)
@@ -274,8 +303,8 @@ class CaseTransformer(BaseEstimator, TransformerMixin):
         effective_components = min(self.n_components, n_samples, hidden_dim)
 
         if effective_components < self.n_components:
-            print(
-                f'Warning: Lowering PCA components from {self.n_components} to {effective_components} due to sample size bounds.'
+            logger.info(
+                f'Lowering PCA components from {self.n_components} to {effective_components} due to sample size bounds.'
             )
 
         # Fit PCA and transform simultaneously

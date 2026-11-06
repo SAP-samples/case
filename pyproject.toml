@@ -20,14 +20,28 @@ dependencies = [
     "torch>=2.12.1",
     "tqdm>=4.68.3",
     "transformers>=5.12.1",
-    "pre-commit",
 ]
 
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
     "pytest-cov>=7.1.0",
+    "pre-commit",
 ]
+
+[project.optional-dependencies]
+flash = [
+  "flash-attn>=2.8.0",
+]
+examples = [
+    "tabicl >= 2.2.0",
+]
+
+[tool.uv]
+no-build-isolation-package = ["flash-attn"]
+
+[tool.uv.extra-build-dependencies]
+flash-attn = ["ninja", "torch", "setuptools", "wheel", "packaging"]
 
 [project.urls]
 Repository = "https://github.com/SAP-samples/case"
@@ -75,7 +89,6 @@ unfixable = []
 dummy-variable-rgx = "^(_+|(_+[a-zA-Z0-9_]*[a-zA-Z0-9]+?))$"
 
 [tool.ruff.lint.isort]
-known-first-party = ["gpt4hana_base"]
 combine-as-imports = true
 
 [tool.ruff.lint.pydocstyle]
