@@ -31,7 +31,7 @@ dev = [
 
 [project.optional-dependencies]
 flash = [
-  "flash-attn>=2.0.0",
+  "flash-attn>=2.8.0",
 ]
 examples = [
     "tabicl >= 2.0",
