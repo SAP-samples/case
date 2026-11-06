@@ -104,8 +104,8 @@ y_train = pd.Series([72000, 130000, 165000, 240000, 85000, 210000], name="income
 X_test = pd.DataFrame({
     "age": [30.0, 30.0, 30.0],
     "job": [
-        "Junior Data Scientist",    # Unseen (implied lower salary band)
-        "Data Scientist III",         # Unseen alternative naming (implied mid/senior)
+        "Associate Data Scientist",    # Unseen (implied lower salary band)
+        "Data Scientist III",         # Unseen alternative naming (implied senior)
         "Principal Data Scientist",  # Unseen (implied leadership premium)
     ],
     "years_experience": [10.0, 10.0, 10.0],
@@ -129,9 +129,9 @@ predictions_case = reg_case.predict(X_test_enhanced)
 print("Predictions w/o CASE:", predictions_baseline)
 print("Predictions w/  CASE:", predictions_case)
 
-# Outputs:
-# Predictions w/o CASE: [157626.7 157626.7 157626.7]
-# Predictions w/  CASE: [123975.09 129967.88 179499.47]
+# Outputs: (note that differences may occur, depending on the GPU and attention backend used)
+# Predictions w/o CASE: [157626.67 157626.67 157626.67]
+# Predictions w/  CASE: [117701.89 129967.88 179499.47]
 ```
 
 This example illustrates a fundamental limitation in traditional tabular learning that **CASE** solves:
