@@ -130,8 +130,8 @@ print("Predictions w/o CASE:", predictions_baseline)
 print("Predictions w/  CASE:", predictions_case)
 
 # Outputs:
-# Predictions w/o CASE: [157626.72 157626.72 157626.72]
-# Predictions w/  CASE: [101439.39 130765.45 196179.86]
+# Predictions w/o CASE: [157626.7 157626.7 157626.7]
+# Predictions w/  CASE: [123975.1  120452.8  179499.48]
 ```
 
 This example illustrates a fundamental limitation in traditional tabular learning that **CASE** solves:
