@@ -34,7 +34,7 @@ flash = [
   "flash-attn>=2.8.0",
 ]
 examples = [
-    "tabicl >= 2.0",
+    "tabicl >= 2.2.0",
 ]
 
 [tool.uv]
