@@ -66,7 +66,7 @@ tuning `MAX_JOBS` depending on your system's RAM and setting `FLASH_ATTN_CUDA_AR
 
 To be able to run the examples below, please install
 ```bash
-uv sync --examples
+uv sync --extra examples
 ```
 
 Our `case` wrapper provides a familiar, `scikit-learn`-compatible transformer interface to extract context-aware semantic embeddings from tabular features, allowing downstream tabular learners to leverage LLM world knowledge.
