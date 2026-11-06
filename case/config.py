@@ -5,8 +5,8 @@ from dataclasses import dataclass
 class SerializationConfig:
     """Configuration options for table serialization."""
 
-    max_length: int = 16_000
-    max_cell_tokens: int = 50
+    max_length: int = 8_000
+    max_cell_tokens: int = 1000
     cell_separator: str = '    '
     scientific_notation: bool = True
     with_header: bool = True
