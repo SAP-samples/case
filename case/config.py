@@ -3,8 +3,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class SerializationConfig:
-    """Table serialization options; max_length bounds the entire returned sequence."""
-
+    """Configuration options for table serialization."""
     max_length: int = 16_000
     max_cell_tokens: int = 50
     cell_separator: str = '    '
