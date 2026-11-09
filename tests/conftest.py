@@ -9,6 +9,28 @@ from transformers import Gemma3TextConfig, Gemma3TextModel
 from case import CaseTransformer
 
 
+def pytest_addoption(parser):
+    parser.addoption(
+        '--run-checkpoint',
+        action='store_true',
+        default=False,
+        help='Run integration tests that load the full SAP/CASE checkpoint.',
+    )
+
+
+def pytest_configure(config):
+    config.addinivalue_line('markers', 'checkpoint: integration test requiring the full SAP/CASE checkpoint')
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption('--run-checkpoint'):
+        return
+    skip = pytest.mark.skip(reason='Pass --run-checkpoint to load the full SAP/CASE checkpoint.')
+    for item in items:
+        if item.get_closest_marker('checkpoint') is not None:
+            item.add_marker(skip)
+
+
 @pytest.fixture(params=['cpu', 'cuda'])
 def torch_device(request):
     if request.param == 'cuda' and not torch.cuda.is_available():

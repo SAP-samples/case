@@ -20,9 +20,10 @@ from case.core import serialize_table
 logger = logging.getLogger(__name__)
 
 
-def _resolve_attn_implementation() -> str:
-    """Use Flash Attention only when both the package and a CUDA device exist."""
-    if torch.cuda.is_available() and importlib.util.find_spec('flash_attn') is not None:
+def _resolve_attn_implementation(device: str = 'auto') -> str:
+    """Use Flash Attention when placement allows CUDA and its package is installed."""
+    use_cuda = device == 'auto' or torch.device(device).type == 'cuda'
+    if use_cuda and torch.cuda.is_available() and importlib.util.find_spec('flash_attn') is not None:
         return 'flash_attention_2'
     return 'sdpa'
 
@@ -46,24 +47,103 @@ def _unique_names(names):
 
 
 class CaseTransformer(TransformerMixin, BaseEstimator):
-    """Generate contextual row embeddings and append their PCA features.
+    """A scikit-learn transformer that generates context-aware semantic embeddings
+    for tabular data by serializing tables for LLM processing.
 
-    max_length bounds context plus query tokens. Space is reserved for a query
-    containing max_cell_tokens tokens per feature, all separators, and the
-    checkpoint's pooling token. A schema that cannot fit raises ValueError.
+    This estimator converts tabular inputs into structured token sequences,
+    optionally builds in-context historical retrieval frames, and extracts hidden state
+    representations from a transformer backbone. The final multi-dimensional embeddings
+    are reduced using an internal PCA projection layer to fit standard downstream tasks.
 
-    context_cv=1 (the default) disables cross-fitting and builds context once.
-    Set context_cv>1 to enable cross-fitting for supervised training: each row
-    is embedded using context from other folds, and PCA fits those embeddings.
-    A final context cache is then built using the full training set. With
-    cross-fitting enabled, fit_transform(X, y) can differ from
-    fit(X, y).transform(X); use fit_transform for downstream training.
+    Attributes:
+        model_name (str): Identifier or local path of the Hugging Face transformer backbone.
+            Defaults to "SAP/CASE". Only causal text backbones are supported; CASE's wrapped
+            checkpoint is loaded as a text model, without a vision tower or vocabulary output head.
+        max_length (int): Maximum combined token budget for the serialized header, context rows,
+            and query row. Must not exceed the backbone's context limit. Space is reserved for
+            a query with up to `max_cell_tokens` tokens per feature, plus separators and the
+            pooling token. A header and reserved query that cannot fit raise ValueError.
+            Defaults to 16,000.
+        num_context_rows (int): Maximum number of training rows sampled without replacement
+            for in-context serialization. Fewer rows may be used to fit the token budget;
+            context rows are included whole. Set to 0 to use only the header as context.
+            Defaults to 128.
+        n_components (int): Target feature dimension for the internal PCA reduction layer.
+            The fitted dimension is capped at the smaller of the training row count and
+            the backbone's hidden dimension. Defaults to 32.
+        scientific_notation (bool): If True, formats numerical target values as rounded,
+            standardized scientific notation strings. Text and pandas categorical targets
+            retain their label identity. Set to False for integer class IDs that must retain
+            their exact representation. Defaults to True.
+        normalize_embeddings (bool): If True, applies L2 normalization to each generated
+            embedding before PCA fitting and projection. Also applies to the raw embeddings
+            returned by `embed`. Defaults to False.
+        batch_size (int): Number of query rows fed into the transformer model per inference
+            batch, during both fitting and transformation. Defaults to 16.
+        dtype (torch.dtype): Floating-point precision used to load model weights.
+            Defaults to torch.bfloat16. Raw embeddings are returned as NumPy float32 arrays.
+        attn_implementation (str | None): Attention backend to load, for example
+            "flash_attention_2" or "sdpa". If None, CPU placement selects "sdpa".
+            Automatic or CUDA placement selects "flash_attention_2" when CUDA is available
+            and the flash-attn package is installed; otherwise selects "sdpa". Defaults to None.
+        random_state (int | None): Seed for context sampling, shuffled cross-fitting splits,
+            and PCA decomposition. Accepts None or an integer in [0, 2**32). A fixed seed
+            does not guarantee identical results across devices or attention backends.
+            Defaults to 42.
+        append_original_features (bool): If True, horizontally concatenates the original
+            input features with the language model PCA features in the returned DataFrame,
+            preserving original values and dtypes. If False, returns only the PCA features.
+            PCA columns are named `lm_pca_0`, `lm_pca_1`, etc., with suffixes added to avoid
+            collisions. All output column names are unique strings. Defaults to True.
+        max_cell_tokens (int): Maximum tokens retained per feature value or feature-column
+            name during serialization. Separators, target values, and the target-column name
+            are outside this per-cell cap but count toward `max_length`. Also determines
+            the space reserved for future query rows. Defaults to 50.
+        context_cv (int): Number of folds for optional supervised cross-fitting. The default,
+            1, disables cross-fitting and builds context once. Values greater than 1 enable
+            cross-fitting only when `y` is provided and `num_context_rows` is positive.
+            The actual fold count is capped at the training row count. See Notes for
+            training semantics and computational cost.
+        device (str): Model placement: "auto", "cpu", "cuda", or "cuda:<index>".
+            "auto" delegates placement to the model loader. Explicit CUDA placement raises
+            ValueError if CUDA is unavailable. Changing this setting requires refitting.
+            Defaults to "auto".
+        pca_ (PCA): Fitted PCA projection, available after successful fitting.
+        n_features_in_ (int): Number of input features seen during fitting.
+        feature_names_in_ (numpy.ndarray): Input feature names in fitted order. Present
+            only when all input column names are strings.
+        target_column_name_ (str): Target name used in serialization; defaults to "target"
+            when `y` is unnamed or absent.
+        embedding_feature_names_ (numpy.ndarray): Collision-free names of the fitted PCA
+            features. Use `get_feature_names_out()` for the complete output schema.
 
-    Targets may be one-dimensional array-like objects or None. Text and pandas
-    categorical targets retain their spelling; scientific_notation controls
-    numeric targets. Set it to False for integer class IDs. Feature names must
-    be unique; transform accepts reordered
-    columns and restores the fitted order, but rejects missing or extra columns.
+    Notes:
+        Inputs must be two-dimensional tables with unique column names. Fitting requires
+        at least two rows and one feature. Targets may be one-dimensional array-like
+        objects of matching length or None; rows and targets are paired by position.
+        Without targets, sampled context rows contain features with empty target values.
+        At inference, DataFrame columns are restored to the fitted order, with missing
+        or extra columns rejected. Array inputs follow the fitted positional schema.
+
+        `fit_transform` and `transform` return pandas DataFrames, preserving the input
+        index when given a DataFrame. `embed` returns a NumPy float32 array of shape
+        (n_samples, hidden_dim), optionally normalized, without PCA or appended features.
+        Both inference methods accept empty tables with the fitted schema.
+
+        With cross-fitting enabled, each training row is embedded using context drawn
+        only from other folds, and PCA is fitted on those embeddings. A final inference
+        context is then sampled from all training rows. For k folds, this requires k + 1
+        context prefills; each training row is still embedded once as a query.
+        `fit_transform(X, y)` can therefore differ from `fit(X, y).transform(X)`. Use
+        `fit_transform` to train downstream models on cross-fitted features. `embed` and
+        `transform` always use the final inference context, which may contain a queried
+        training row's own target when applied to training data.
+
+        Every call to `fit` or `fit_transform` rebuilds the context cache and PCA. Loaded
+        model weights are reused when the model, precision, resolved attention backend,
+        and device settings are unchanged. Changing any parameter except `batch_size`
+        or `append_original_features` requires refitting before inference. A failed fit
+        clears the fitted state.
     """
 
     def __init__(
@@ -211,7 +291,7 @@ class CaseTransformer(TransformerMixin, BaseEstimator):
 
     def _setup_model(self):
         """Load the backbone without its vocabulary head, reusing identical weights."""
-        attention = self.attn_implementation or _resolve_attn_implementation()
+        attention = self.attn_implementation or _resolve_attn_implementation(self.device)
         signature = (self.model_name, self.dtype, attention, self.device)
         if self._model is not None and self._model_signature == signature:
             return

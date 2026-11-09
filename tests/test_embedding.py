@@ -1,4 +1,5 @@
 import copy
+import importlib.util
 from unittest.mock import patch
 
 import numpy as np
@@ -325,9 +326,41 @@ def test_sklearn_clone_tags_pipeline_and_set_output(make_transformer, data):
     assert pipeline.predict(X).shape == (len(X),)
 
 
-def test_cpu_attention_selection():
-    with patch('torch.cuda.is_available', return_value=False), patch('importlib.util.find_spec', return_value=object()):
-        assert _resolve_attn_implementation() == 'sdpa'
+@pytest.mark.parametrize(
+    'device, cuda_available, flash_available, expected',
+    [
+        ('cpu', True, True, 'sdpa'),
+        ('cpu:0', True, True, 'sdpa'),
+        ('auto', True, True, 'flash_attention_2'),
+        ('cuda:1', True, True, 'flash_attention_2'),
+        ('auto', False, True, 'sdpa'),
+        ('auto', True, False, 'sdpa'),
+        ('cuda', True, False, 'sdpa'),
+    ],
+)
+def test_attention_selection(device, cuda_available, flash_available, expected):
+    with (
+        patch('torch.cuda.is_available', return_value=cuda_available),
+        patch('importlib.util.find_spec', return_value=object() if flash_available else None),
+    ):
+        assert _resolve_attn_implementation(device) == expected
+
+
+def test_cpu_model_uses_sdpa_when_cuda_and_flash_are_available(make_transformer, data):
+    find_spec = importlib.util.find_spec
+
+    def available_package(name, *args, **kwargs):
+        return object() if name == 'flash_attn' else find_spec(name, *args, **kwargs)
+
+    with (
+        patch('torch.cuda.is_available', return_value=True),
+        patch('importlib.util.find_spec', side_effect=available_package),
+    ):
+        tr = make_transformer(device='cpu', attn_implementation=None)
+        output = tr.fit_transform(*data)
+    assert make_transformer.loader.call_args.kwargs['attn_implementation'] == 'sdpa'
+    assert all(parameter.device.type == 'cpu' for parameter in tr._model.parameters())
+    assert output.shape == (4, 5)
 
 
 @pytest.mark.parametrize('checkpoint_layout', ['text', 'case'])

@@ -5,12 +5,14 @@ import time
 
 import numpy as np
 import pandas as pd
+import pytest
 import torch
 from sklearn.linear_model import Ridge
 
 from case import CaseTransformer
 
 
+@pytest.mark.checkpoint
 def test_case_checkpoint_end_to_end(torch_device):
     """Fit CASE and a downstream regressor, then check real held-out embeddings."""
     use_cuda = torch_device == 'cuda'

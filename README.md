@@ -150,6 +150,7 @@ case_embedder.fit(X_train, y_train)
 embeddings = case_embedder.embed(X_test)
 ```
 
+## Further details
 Cross-fitting is **optional and disabled by default** (`context_cv=1`). The
 default builds context once and embeds each training row once.
 
@@ -201,27 +202,26 @@ CASE loads only the text backbone, including when the checkpoint stores text
 weights inside a wrapper. No vision tower or image projector is constructed.
 Use `device="cpu"` or `device="cuda"` to require a particular device; the default
 `device="auto"` retains automatic placement. Changing the device requires refitting.
+With `attn_implementation=None`, CPU placement uses SDPA. Automatic or CUDA
+placement uses Flash Attention 2 when CUDA and `flash-attn` are available,
+and SDPA otherwise.
 
-The suite includes lightweight text-model tests and an end-to-end test with the
-actual SAP/CASE checkpoint. Device-sensitive tests, including the checkpoint test,
-always run on CPU and also run on CUDA when available. CUDA cases are skipped
-only when CUDA is unavailable. No opt-in flag or custom pytest option is needed:
 
-~~~bash
+## Tests
+The default test suite uses lightweight text models and runs without downloading
+the CASE checkpoint. Device-sensitive tests run on CPU and also on CUDA when
+available; CUDA cases are skipped when CUDA is unavailable:
+
+```bash
 uv run pytest tests/
-~~~
+```
 
-To run just the real checkpoint test on both available devices:
+The end-to-end test with the actual CASE checkpoint is marked `checkpoint`
+and skipped by default. To run it on CPU and also on CUDA when available:
 
-~~~bash
-uv run pytest -s -v tests/test_checkpoint.py
-~~~
-
-The CUDA case asserts that the model actually resides on CUDA. It uses bfloat16
-when supported; the CPU case uses float32 and needs roughly 47 GB for text weights
-plus working memory. Both check fitting, held-out embeddings, predictions, and
-batching consistency. Set `HF_HUB_OFFLINE=1` to require cached model files, or
-`CASE_CHECKPOINT_MODEL` to load a specific local CASE snapshot.
+```bash
+uv run pytest --run-checkpoint -s -v tests/test_checkpoint.py
+```
 
 ## How to obtain support
 [Create an issue](https://github.com/SAP-samples/case/issues) in this repository if you find a bug or have questions about the content.
