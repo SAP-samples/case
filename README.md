@@ -1,4 +1,6 @@
 [![REUSE status](https://api.reuse.software/badge/github.com/SAP-samples/case)](https://api.reuse.software/info/github.com/SAP-samples/case)
+[![HuggingFace - Model](https://img.shields.io/badge/HuggingFace-Model-orange?logo=huggingface)](https://huggingface.co/SAP/CASE)
+
 
 # CASE: Context-Aware Semantic Embeddings
 Inference code described in the paper ["Enhancing Tabular Learners with
@@ -60,6 +62,8 @@ FLASH_ATTN_CUDA_ARCHS=80 MAX_JOBS=20 uv sync --extra flash
 ```
 tuning `MAX_JOBS` depending on your system's RAM and setting `FLASH_ATTN_CUDA_ARCHS` corresponding to your GPU.
 
+## Model Checkpoints
+To run CASE, you need access to our custom model checkpoints on HuggingFace: https://huggingface.co/SAP/CASE
 
 
 ## Usage Example
@@ -129,17 +133,13 @@ predictions_case = reg_case.predict(X_test_enhanced)
 print("Predictions w/o CASE:", predictions_baseline)
 print("Predictions w/  CASE:", predictions_case)
 
-# Outputs: (note that differences may occur, depending on the GPU and attention backend used)
-# Predictions w/o CASE: [157626.67 157626.67 157626.67]
-# Predictions w/  CASE: [117701.89 129967.88 179499.47]
+# Predictions depend on the model, context folds, GPU, and attention backend.
 ```
 
-This example illustrates a fundamental limitation in traditional tabular learning that **CASE** solves:
-
-* **Baseline Failure:** Standard tabular architectures lack the semantic grounding to parse raw text features. When faced with identical numerical vectors (`age=30`, `exp=10`), a standalone predictor collapses to the group mean (~157k), completely blind to the fact that a *Junior* and a *Principal* should occupy drastically different salary bands.
-* **CASE Advantage:** By projecting categorical and textual features into a structured, context-aware embedding space, CASE explicitly captures domain-specific hierarchies and lexical variations:
-  * **Synonym Mapping:** It reasons that `"Data Scientist III"` shares a semantic profile with the training set's `"Senior Data Scientist"`, leading to a highly accurate, generalized prediction (~130k).
-  * **Zero-Shot Relational Scaling:** It extracts the relative weight of prefixes like `"Junior"` and `"Principal"` against historical records, scaling the continuous target up or down realistically without ever seeing those exact string labels during training.
+The example compares a predictor using the original features with one using
+additional semantic features. CASE can connect unseen job titles to related
+training examples, but this small illustrative dataset does not establish
+prediction accuracy or a guaranteed improvement.
 
 ## Advanced Usage
 If you want to use the CASE embeddings directly for another task, you may extract them as follows:
@@ -148,6 +148,79 @@ If you want to use the CASE embeddings directly for another task, you may extrac
 case_embedder = CaseTransformer()
 case_embedder.fit(X_train, y_train)
 embeddings = case_embedder.embed(X_test)
+```
+
+## Further details
+Cross-fitting is **optional and disabled by default** (`context_cv=1`). The
+default builds context once and embeds each training row once.
+
+For an ablation, enable it with `CaseTransformer(context_cv=5)` (or another value
+greater than one). Each training row is then embedded against context sampled
+from other folds, excluding its own label, and PCA fits those embeddings. The
+fold count is capped at the number of training rows. CASE then builds the final
+context cache from the full training set for inference. With `k` folds this
+requires `k + 1` context prefills; each training row is still embedded once.
+Its runtime and predictive benefit should be measured on your dataset.
+
+When cross-fitting is enabled, use `fit_transform(X_train, y_train)` for training
+and `transform(X_test)` for evaluation. Calling `transform(X_train)` or
+`embed(X_train)` uses the final context and can expose training labels to their
+own rows, so it differs from cross-fitted training features. Keep the entire
+transformer inside each evaluation fold or scikit-learn pipeline.
+
+`max_length` is a hard limit on the **complete context plus query**. The transformer
+reserves up to `max_cell_tokens` tokens per query cell (default 50), separators,
+and the checkpoint's final pooling token before packing context rows. This keeps
+context fixed across batches and accommodates future cells up to the same cap.
+If the header and reserved query cannot fit, increase `max_length` or reduce
+`max_cell_tokens`. Context rows are dropped whole when the remaining budget is
+full; oversized fixed sequences raise an error. The configured length must also
+fit the model's context window.
+
+Targets can be pandas Series, NumPy arrays, lists, or omitted. They must be
+one-dimensional and match the number of training rows. With `y=None`, context
+contains feature values with empty targets. With `num_context_rows=0`, the header
+is still included. Text and pandas categorical targets keep their exact labels.
+For numeric targets, `scientific_notation=True` retains the checkpoint's rounded
+scientific representation; set it to `False` for integer class IDs or when exact
+numeric spelling is needed. At least two training rows are required for PCA.
+
+Feature names must be unique. Transform restores fitted column order and rejects
+missing or extra columns. Output names are strings; non-string input names are
+converted, and suffixes resolve collisions with generated `lm_pca_*` names.
+`get_feature_names_out()` reports the resulting schema. PCA uses at most the
+smaller of the requested component count, training-row count, and embedding
+width. Empty inference tables return empty outputs with that schema.
+
+Every fit rebuilds context and PCA. Identical model settings reuse loaded
+weights; changing the model, dtype, or attention backend reloads them on the next
+fit. Changing fitting parameters requires refitting. `batch_size` and
+`append_original_features` may be changed for inference. CASE loads the backbone
+without a vocabulary head and retains only final hidden states during inference.
+
+CASE loads only the text backbone, including when the checkpoint stores text
+weights inside a wrapper. No vision tower or image projector is constructed.
+Use `device="cpu"` or `device="cuda"` to require a particular device; the default
+`device="auto"` retains automatic placement. Changing the device requires refitting.
+With `attn_implementation=None`, CPU placement uses SDPA. Automatic or CUDA
+placement uses Flash Attention 2 when CUDA and `flash-attn` are available,
+and SDPA otherwise.
+
+
+## Tests
+The default test suite uses lightweight text models and runs without downloading
+the CASE checkpoint. Device-sensitive tests run on CPU and also on CUDA when
+available; CUDA cases are skipped when CUDA is unavailable:
+
+```bash
+uv run pytest tests/
+```
+
+The end-to-end test with the actual CASE checkpoint is marked `checkpoint`
+and skipped by default. To run it on CPU and also on CUDA when available:
+
+```bash
+uv run pytest --run-checkpoint -s -v tests/test_checkpoint.py
 ```
 
 ## How to obtain support

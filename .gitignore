@@ -7,3 +7,5 @@
 # Standard Python compiled files
 __pycache__/
 *.pyc
+case.egg-info/
+.idea/
