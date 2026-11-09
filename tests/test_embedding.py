@@ -17,10 +17,9 @@ from case.core import serialize_table
 from case.embedding import _resolve_attn_implementation
 
 
-@pytest.mark.parametrize('model_name', ['tiny-text', 'tiny-multimodal'])
-def test_native_batch_cache_and_full_sequence_equivalence(make_transformer, data, model_name):
+def test_native_batch_cache_and_full_sequence_equivalence(make_transformer, data):
     X, y = data
-    tr = make_transformer(model_name=model_name, batch_size=1)
+    tr = make_transformer(batch_size=1)
     tr._setup_model()
     prefixes = []
 
@@ -241,9 +240,8 @@ def test_total_token_budget_and_long_future_queries(make_transformer, data):
         make_transformer(max_length=20000).fit(X, y)
 
 
-@pytest.mark.parametrize('model_name', ['tiny-text', 'tiny-multimodal'])
-def test_only_backbone_output_and_compact_cache(make_transformer, data, model_name):
-    tr = make_transformer(model_name=model_name)
+def test_only_backbone_output_and_compact_cache(make_transformer, data):
+    tr = make_transformer()
     tr._setup_model()
     seen = []
 

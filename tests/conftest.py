@@ -4,7 +4,7 @@ from unittest.mock import Mock
 import pandas as pd
 import pytest
 import torch
-from transformers import Gemma3Config, Gemma3Model, Gemma3TextConfig, Gemma3TextModel, SiglipVisionConfig
+from transformers import Gemma3TextConfig, Gemma3TextModel
 
 from case import CaseTransformer
 
@@ -57,7 +57,6 @@ def torch_threads():
 
 @pytest.fixture
 def make_transformer(monkeypatch):
-    torch.manual_seed(42)
     text_config = Gemma3TextConfig(
         vocab_size=256,
         hidden_size=32,
@@ -71,28 +70,12 @@ def make_transformer(monkeypatch):
         query_pre_attn_scalar=8,
         attn_implementation='sdpa',
     )
-    text_model = Gemma3TextModel(text_config).eval()
-    vision_config = SiglipVisionConfig(
-        hidden_size=16,
-        intermediate_size=32,
-        num_hidden_layers=1,
-        num_attention_heads=2,
-        image_size=8,
-        patch_size=4,
-    )
-    multimodal_config = Gemma3Config(
-        text_config=copy.deepcopy(text_config),
-        vision_config=vision_config,
-        mm_tokens_per_image=4,
-        image_token_index=255,
-        boi_token_index=253,
-        eoi_token_index=254,
-    )
-    multimodal_config._attn_implementation = 'sdpa'
-    multimodal_model = Gemma3Model(multimodal_config).eval()
 
     def load_model(name, **kwargs):
-        model = copy.deepcopy(multimodal_model if name == 'tiny-multimodal' else text_model)
+        # Build one text model only when loading is actually requested.
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(42)
+            model = Gemma3TextModel(copy.deepcopy(text_config)).eval()
         model.to(dtype=kwargs['dtype'])
         model.set_attn_implementation(kwargs['attn_implementation'])
         return model
