@@ -9,6 +9,13 @@ from transformers import Gemma3TextConfig, Gemma3TextModel
 from case import CaseTransformer
 
 
+@pytest.fixture(params=['cpu', 'cuda'])
+def torch_device(request):
+    if request.param == 'cuda' and not torch.cuda.is_available():
+        pytest.skip('CUDA is unavailable.')
+    return request.param
+
+
 class CharacterTokenizer:
     """Offline character tokenizer with BOS, separators, and real tensor padding."""
 
@@ -76,12 +83,14 @@ def make_transformer(monkeypatch):
         with torch.random.fork_rng(devices=[]):
             torch.manual_seed(42)
             model = Gemma3TextModel(copy.deepcopy(text_config)).eval()
-        model.to(dtype=kwargs['dtype'])
+        device = kwargs['device_map'] if kwargs['device_map'] != 'auto' else 'cpu'
+        model.to(device=device, dtype=kwargs['dtype'])
         model.set_attn_implementation(kwargs['attn_implementation'])
         return model
 
     loader = Mock(side_effect=load_model)
     tokenizer_loader = Mock(side_effect=lambda *args, **kwargs: CharacterTokenizer())
+    monkeypatch.setattr('case.embedding.AutoConfig.from_pretrained', lambda *args, **kwargs: copy.deepcopy(text_config))
     monkeypatch.setattr('case.embedding.AutoModel.from_pretrained', loader)
     monkeypatch.setattr('case.embedding.AutoTokenizer.from_pretrained', tokenizer_loader)
 

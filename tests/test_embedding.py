@@ -17,9 +17,9 @@ from case.core import serialize_table
 from case.embedding import _resolve_attn_implementation
 
 
-def test_native_batch_cache_and_full_sequence_equivalence(make_transformer, data):
+def test_native_batch_cache_and_full_sequence_equivalence(make_transformer, data, torch_device):
     X, y = data
-    tr = make_transformer(batch_size=1)
+    tr = make_transformer(batch_size=1, device=torch_device)
     tr._setup_model()
     prefixes = []
 
@@ -29,6 +29,8 @@ def test_native_batch_cache_and_full_sequence_equivalence(make_transformer, data
 
     handle = tr._model.register_forward_pre_hook(capture_prefix, with_kwargs=True)
     tr.fit(X, y)
+    assert tr._device.type == torch_device
+    assert all(layer.keys.device.type == torch_device for layer in tr._kv_cache.layers)
     handle.remove()
     saved = copy.deepcopy(tr._kv_cache)
     single = tr.embed(X)
@@ -44,8 +46,11 @@ def test_native_batch_cache_and_full_sequence_equivalence(make_transformer, data
         tr.target_column_name_, tr._tokenizer, row=X.iloc[0], config=tr._serialization_config(with_header=False)
     )['input_ids']
     with torch.inference_mode():
-        full = tr._model(torch.cat([prefixes[0], torch.tensor([query])], dim=1), use_cache=False)
-    np.testing.assert_allclose(batch[0], full.last_hidden_state[0, -1].numpy(), atol=2e-6, rtol=2e-5)
+        full = tr._model(
+            torch.cat([prefixes[0], torch.tensor([query], device=tr._device)], dim=1),
+            use_cache=False,
+        )
+    np.testing.assert_allclose(batch[0], full.last_hidden_state[0, -1].cpu().numpy(), atol=2e-6, rtol=2e-5)
 
 
 def test_refit_matches_fresh_and_reuses_only_weights(make_transformer, data):
@@ -240,8 +245,8 @@ def test_total_token_budget_and_long_future_queries(make_transformer, data):
         make_transformer(max_length=20000).fit(X, y)
 
 
-def test_only_backbone_output_and_compact_cache(make_transformer, data):
-    tr = make_transformer()
+def test_only_backbone_output_and_compact_cache(make_transformer, data, torch_device):
+    tr = make_transformer(device=torch_device)
     tr._setup_model()
     seen = []
 
@@ -251,6 +256,7 @@ def test_only_backbone_output_and_compact_cache(make_transformer, data):
         assert outputs.attentions is None
         assert not hasattr(outputs, 'logits')
         assert outputs.last_hidden_state.shape[-1] == 32
+        assert outputs.last_hidden_state.device.type == torch_device
         seen.append(True)
 
     h = tr._model.register_forward_hook(check_outputs, with_kwargs=True)
@@ -324,17 +330,17 @@ def test_cpu_attention_selection():
         assert _resolve_attn_implementation() == 'sdpa'
 
 
-def test_loading_saved_language_model_as_backbone(tmp_path, monkeypatch, tokenizer, data):
-    from transformers import (
-        AutoModel,
-        Gemma3Config,
-        Gemma3ForConditionalGeneration,
-        Gemma3TextConfig,
-        SiglipVisionConfig,
-    )
+@pytest.mark.parametrize('checkpoint_layout', ['text', 'case'])
+def test_loading_saved_language_model_as_backbone(
+    tmp_path, monkeypatch, tokenizer, data, torch_device, checkpoint_layout
+):
+    import json
+
+    from safetensors.torch import save_file
+    from transformers import Gemma3ForCausalLM, Gemma3TextConfig, Gemma3TextModel
 
     torch.manual_seed(42)
-    text = Gemma3TextConfig(
+    config = Gemma3TextConfig(
         vocab_size=256,
         hidden_size=32,
         intermediate_size=64,
@@ -346,21 +352,16 @@ def test_loading_saved_language_model_as_backbone(tmp_path, monkeypatch, tokeniz
         max_position_embeddings=16384,
         query_pre_attn_scalar=8,
     )
-    vision = SiglipVisionConfig(
-        hidden_size=16, intermediate_size=32, num_hidden_layers=1, num_attention_heads=2, image_size=8, patch_size=4
-    )
-    config = Gemma3Config(
-        text_config=text,
-        vision_config=vision,
-        mm_tokens_per_image=4,
-        image_token_index=255,
-        boi_token_index=253,
-        eoi_token_index=254,
-    )
     config._attn_implementation = 'sdpa'
-    source = Gemma3ForConditionalGeneration(config).eval()
+    source = Gemma3ForCausalLM(config).eval()
     source.save_pretrained(tmp_path)
-    # Only tokenizer construction is replaced; actual AutoModel loading and weight mapping run.
+    if checkpoint_layout == 'case':
+        # Exercise CASE's on-disk text-weight layout without constructing image modules.
+        (tmp_path / 'config.json').write_text(json.dumps({'model_type': 'gemma3', 'text_config': config.to_dict()}))
+        save_file(
+            {f'language_model.model.{key}': weight for key, weight in source.model.state_dict().items()},
+            tmp_path / 'model.safetensors',
+        )
     monkeypatch.setattr('case.embedding.AutoTokenizer.from_pretrained', lambda *args, **kwargs: tokenizer)
     tr = CaseTransformer(
         model_name=str(tmp_path),
@@ -370,11 +371,16 @@ def test_loading_saved_language_model_as_backbone(tmp_path, monkeypatch, tokeniz
         context_cv=2,
         n_components=3,
         attn_implementation='sdpa',
+        device=torch_device,
     )
     tr.fit_transform(*data)
-    assert isinstance(tr._model, AutoModel._model_mapping[type(config)])
+    assert isinstance(tr._model, Gemma3TextModel)
+    assert tr._device.type == torch_device
+    loaded_weights = tr._model.state_dict()
+    assert loaded_weights.keys() == source.model.state_dict().keys()
     for key, weight in source.model.state_dict().items():
-        torch.testing.assert_close(tr._model.state_dict()[key], weight, rtol=0, atol=0)
+        assert loaded_weights[key].device.type == torch_device
+        torch.testing.assert_close(loaded_weights[key].cpu(), weight.cpu(), rtol=0, atol=0)
     assert not hasattr(tr._model, 'lm_head')
 
 

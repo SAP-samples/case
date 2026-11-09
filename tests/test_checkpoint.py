@@ -1,24 +1,19 @@
-"""Opt-in end-to-end test using the actual SAP/CASE weights and tokenizer."""
+"""End-to-end test using the actual SAP/CASE weights and tokenizer on CPU and CUDA."""
 
 import os
 import time
 
 import numpy as np
 import pandas as pd
-import pytest
 import torch
 from sklearn.linear_model import Ridge
 
 from case import CaseTransformer
 
 
-@pytest.mark.skipif(
-    os.environ.get('CASE_RUN_CHECKPOINT_TEST') != '1',
-    reason='Set CASE_RUN_CHECKPOINT_TEST=1 to load and run the full SAP/CASE checkpoint.',
-)
-def test_case_checkpoint_end_to_end():
+def test_case_checkpoint_end_to_end(torch_device):
     """Fit CASE and a downstream regressor, then check real held-out embeddings."""
-    use_cuda = torch.cuda.is_available()
+    use_cuda = torch_device == 'cuda'
     dtype = torch.bfloat16 if use_cuda and torch.cuda.is_bf16_supported() else torch.float32
     previous_threads = torch.get_num_threads()
     if not use_cuda:
@@ -46,6 +41,7 @@ def test_case_checkpoint_end_to_end():
         batch_size=2,
         context_cv=1,
         append_original_features=False,
+        device=torch_device,
     )
     try:
         started = time.perf_counter()
@@ -54,7 +50,10 @@ def test_case_checkpoint_end_to_end():
         fit_seconds = time.perf_counter() - started
         config = transformer._model.config
         hidden_size = config.get_text_config().hidden_size
-        assert config.model_type == 'gemma3'
+        assert config.model_type == 'gemma3_text'
+        assert all(parameter.device.type == torch_device for parameter in transformer._model.parameters())
+        assert transformer._device.type == torch_device
+        assert not any('vision' in name or 'multi_modal' in name for name, _ in transformer._model.named_modules())
         assert hidden_size == 3840
         assert train_features.shape == (len(X_train), 3)
         assert train_features.index.equals(X_train.index)

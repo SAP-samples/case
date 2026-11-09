@@ -12,7 +12,7 @@ from sklearn.model_selection import KFold
 from sklearn.preprocessing import normalize
 from sklearn.utils.validation import check_is_fitted
 from tqdm import tqdm
-from transformers import AutoModel, AutoTokenizer, DynamicCache
+from transformers import AutoConfig, AutoModel, AutoTokenizer, DynamicCache
 
 from case.config import SerializationConfig
 from case.core import serialize_table
@@ -81,6 +81,7 @@ class CaseTransformer(TransformerMixin, BaseEstimator):
         append_original_features: bool = True,
         max_cell_tokens: int = 50,
         context_cv: int = 1,
+        device: str = 'auto',
     ):
         self.model_name = model_name
         self.max_length = max_length
@@ -95,6 +96,7 @@ class CaseTransformer(TransformerMixin, BaseEstimator):
         self.append_original_features = append_original_features
         self.max_cell_tokens = max_cell_tokens
         self.context_cv = context_cv
+        self.device = device
         self._model = None
         self._tokenizer = None
         self._device = None
@@ -164,6 +166,15 @@ class CaseTransformer(TransformerMixin, BaseEstimator):
             raise ValueError('dtype must be a floating-point torch.dtype.')
         if self.attn_implementation is not None and not isinstance(self.attn_implementation, str):
             raise ValueError('attn_implementation must be None or a string.')
+        if self.device != 'auto':
+            try:
+                device = torch.device(self.device)
+            except (TypeError, RuntimeError) as error:
+                raise ValueError('device must be auto, cpu, cuda, or cuda:<index>.') from error
+            if device.type not in ('cpu', 'cuda'):
+                raise ValueError('device must be auto, cpu, cuda, or cuda:<index>.')
+            if device.type == 'cuda' and not torch.cuda.is_available():
+                raise ValueError('CUDA was requested but is not available.')
 
     def _validate_X(self, X, *, fitting=False):
         if not isinstance(X, pd.DataFrame) and np.asarray(X).ndim != 2:
@@ -201,18 +212,28 @@ class CaseTransformer(TransformerMixin, BaseEstimator):
     def _setup_model(self):
         """Load the backbone without its vocabulary head, reusing identical weights."""
         attention = self.attn_implementation or _resolve_attn_implementation()
-        signature = (self.model_name, self.dtype, attention)
+        signature = (self.model_name, self.dtype, attention, self.device)
         if self._model is not None and self._model_signature == signature:
             return
         self._model = self._tokenizer = self._device = None
         self._model_signature = None
         tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+        config = AutoConfig.from_pretrained(self.model_name)
+        text_config = config.get_text_config()
+        load_kwargs = {}
+        if config.model_type == 'gemma3':
+            # CASE checkpoints wrap the text weights; extract them without a vision tower.
+            load_kwargs['key_mapping'] = {r'^(?:language_model\.model|model\.language_model)\.': ''}
+        elif text_config is not config:
+            raise ValueError('Only text models and the CASE text checkpoint are supported.')
         # Load only the backbone: per-token vocabulary logits are unused and can consume several GiB.
         model = AutoModel.from_pretrained(
             self.model_name,
-            device_map='auto',
+            config=text_config,
+            device_map=self.device,
             dtype=self.dtype,
             attn_implementation=attention,
+            **load_kwargs,
         )
         model.eval()
         if getattr(model.config.get_text_config(), 'use_bidirectional_attention', False):

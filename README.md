@@ -1,4 +1,6 @@
 [![REUSE status](https://api.reuse.software/badge/github.com/SAP-samples/case)](https://api.reuse.software/info/github.com/SAP-samples/case)
+[![HuggingFace - Model](https://img.shields.io/badge/HuggingFace-Model-orange?logo=huggingface)](https://huggingface.co/SAP/CASE)
+
 
 # CASE: Context-Aware Semantic Embeddings
 Inference code described in the paper ["Enhancing Tabular Learners with
@@ -60,6 +62,8 @@ FLASH_ATTN_CUDA_ARCHS=80 MAX_JOBS=20 uv sync --extra flash
 ```
 tuning `MAX_JOBS` depending on your system's RAM and setting `FLASH_ATTN_CUDA_ARCHS` corresponding to your GPU.
 
+## Model Checkpoints
+To run CASE, you need access to our custom model checkpoints on HuggingFace: https://huggingface.co/SAP/CASE
 
 
 ## Usage Example
@@ -193,10 +197,31 @@ fit. Changing fitting parameters requires refitting. `batch_size` and
 `append_original_features` may be changed for inference. CASE loads the backbone
 without a vocabulary head and retains only final hidden states during inference.
 
-The offline regression tests use tiny native Gemma text and multimodal models:
-```bash
-uv run pytest
-```
+CASE loads only the text backbone, including when the checkpoint stores text
+weights inside a wrapper. No vision tower or image projector is constructed.
+Use `device="cpu"` or `device="cuda"` to require a particular device; the default
+`device="auto"` retains automatic placement. Changing the device requires refitting.
+
+The suite includes lightweight text-model tests and an end-to-end test with the
+actual SAP/CASE checkpoint. Device-sensitive tests, including the checkpoint test,
+always run on CPU and also run on CUDA when available. CUDA cases are skipped
+only when CUDA is unavailable. No opt-in flag or custom pytest option is needed:
+
+~~~bash
+uv run pytest tests/
+~~~
+
+To run just the real checkpoint test on both available devices:
+
+~~~bash
+uv run pytest -s -v tests/test_checkpoint.py
+~~~
+
+The CUDA case asserts that the model actually resides on CUDA. It uses bfloat16
+when supported; the CPU case uses float32 and needs roughly 47 GB for text weights
+plus working memory. Both check fitting, held-out embeddings, predictions, and
+batching consistency. Set `HF_HUB_OFFLINE=1` to require cached model files, or
+`CASE_CHECKPOINT_MODEL` to load a specific local CASE snapshot.
 
 ## How to obtain support
 [Create an issue](https://github.com/SAP-samples/case/issues) in this repository if you find a bug or have questions about the content.
