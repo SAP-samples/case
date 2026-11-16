@@ -8,7 +8,10 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 import torch
+from accelerate.hooks import AlignDevicesHook, SequentialHook
 from safetensors.torch import save_file
+from torch._subclasses.fake_tensor import FakeTensorMode
+from torch.utils._pytree import tree_leaves
 from transformers import (
     AutoModelForCausalLM,
     Gemma4TextConfig,
@@ -18,7 +21,6 @@ from transformers import (
     Qwen3_5TextConfig,
     Qwen3Config,
 )
-from torch.utils._pytree import tree_leaves
 
 from case import CaseTransformer
 from case.core import serialize_table
@@ -304,3 +306,58 @@ def test_hybrid_cache_state_isolated_and_restored(tmp_path, monkeypatch, tokeniz
     for layer in moved.layers:
         if isinstance(getattr(layer, 'device', None), torch.device):
             assert layer.device.type == 'meta'
+
+
+@pytest.mark.parametrize('model_type', ['gpt2', 'gemma4_shared', 'qwen3_5'])
+@pytest.mark.parametrize('placement', ['parameters', 'offload_hook'])
+def test_pickled_cache_restores_layer_execution_devices(tmp_path, monkeypatch, tokenizer, data, model_type, placement):
+    source = _save_checkpoint(tmp_path, model_type, '', None)
+    monkeypatch.setattr('case.embedding.AutoTokenizer.from_pretrained', lambda *args, **kwargs: tokenizer)
+    # Start with automatic CPU placement before simulating the reloaded GPU layout.
+    monkeypatch.setattr(torch.cuda, 'device_count', lambda: 0)
+    transformer = CaseTransformer(
+        model_name=str(tmp_path),
+        dtype=torch.float32,
+        max_length=512,
+        max_cell_tokens=8,
+        n_components=3,
+        device='auto',
+        attn_implementation='sdpa',
+    ).fit(*data)
+    restored = pickle.loads(pickle.dumps(transformer))
+    assert restored._model is None
+    model = source.base_model
+    blocks = model.h if model_type == 'gpt2' else model.layers
+
+    def reload_model():
+        restored._model = model
+        restored._device = torch.device('cuda:0')
+        restored._tokenizer = tokenizer
+
+    monkeypatch.setattr(restored, '_setup_model', reload_model)
+    # Pickle real CPU state first: FakeTensorMode then exercises distinct GPU
+    # placements and native cache updates without requiring CUDA hardware.
+    with FakeTensorMode(allow_non_fake_inputs=True):
+        for index, block in enumerate(blocks):
+            device = torch.device('cuda', (index + 1) % 2)
+            if placement == 'parameters':
+                block.to(device)
+            else:
+                block.to('meta')
+                block._hf_hook = SequentialHook(AlignDevicesHook(execution_device=device, offload=True))
+        restored._ensure_runtime()
+        cache = restored._kv_cache
+        for index, layer in enumerate(cache.layers):
+            device = torch.device('cuda', (index + 1) % 2)
+            if getattr(layer, 'keys', None) is not None:
+                states = torch.zeros((*layer.keys.shape[:2], 1, layer.keys.shape[-1]), device=device)
+                keys, values = cache.update(states, states, index)
+                assert keys.device == values.device == device
+            else:
+                recurrent = cache.get_recurrent_state(index)
+                assert recurrent is not None
+                assert recurrent.device == device
+                cache.update_recurrent_state(torch.zeros_like(recurrent, device=device), index)
+            tensors = [value for value in tree_leaves(vars(layer)) if isinstance(value, torch.Tensor)]
+            assert tensors
+            assert all(value.device == device for value in tensors)

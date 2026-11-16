@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 import torch
 from sklearn.base import clone
+from sklearn.compose import ColumnTransformer
 from sklearn.exceptions import NotFittedError
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import make_pipeline
@@ -366,6 +367,43 @@ def test_sklearn_clone_tags_pipeline_and_set_output(make_transformer, data):
     pipeline = make_pipeline(cloned.set_output(transform='pandas'), Ridge())
     pipeline.fit(X, y.to_numpy())
     assert pipeline.predict(X).shape == (len(X),)
+
+
+@pytest.mark.parametrize('pandas_output', [False, True])
+@pytest.mark.parametrize('append_original_features', [False, True])
+def test_column_transformer_with_numpy_inputs(make_transformer, data, pandas_output, append_original_features):
+    X, y = data
+    X = X.to_numpy()
+    transformer = ColumnTransformer(
+        [('case', make_transformer(append_original_features=append_original_features), [1])]
+    )
+    if pandas_output:
+        transformer.set_output(transform='pandas')
+    expected = make_transformer(append_original_features=append_original_features).fit_transform(X[:, [1]], y)
+    actual = transformer.fit_transform(X, y)
+    names = [f'case__{name}' for name in expected.columns]
+    assert transformer.get_feature_names_out().tolist() == names
+    np.testing.assert_allclose(np.asarray(actual, dtype=float), expected.to_numpy(dtype=float), atol=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(transformer.transform(X), dtype=float), np.asarray(actual, dtype=float), atol=1e-6
+    )
+    if pandas_output:
+        assert actual.columns.tolist() == names
+
+
+@pytest.mark.parametrize('use_dataframe', [False, True])
+def test_feature_names_for_positional_inputs(make_transformer, data, use_dataframe):
+    X, y = data
+    positional = X.set_axis([0, 1], axis=1) if use_dataframe else X.to_numpy()
+    transformer = make_transformer().fit(positional, y)
+    np.testing.assert_array_equal(transformer.get_feature_names_out(['x0', 'x1']), transformer.get_feature_names_out())
+    with pytest.raises(ValueError, match='input_features'):
+        transformer.get_feature_names_out(['x0'])
+
+    transformer.fit(X, y)
+    np.testing.assert_array_equal(transformer.get_feature_names_out(X.columns), transformer.get_feature_names_out())
+    with pytest.raises(ValueError, match='input_features'):
+        transformer.get_feature_names_out(['age', 'job'])
 
 
 @pytest.mark.parametrize(

@@ -11,7 +11,7 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.decomposition import PCA
 from sklearn.model_selection import KFold
 from sklearn.preprocessing import normalize
-from sklearn.utils.validation import check_is_fitted
+from sklearn.utils.validation import _check_feature_names_in, check_is_fitted
 from torch.utils._pytree import tree_map
 from tqdm import tqdm
 from transformers import AutoConfig, AutoModel, AutoTokenizer, DynamicCache, Gemma3TextModel
@@ -242,25 +242,72 @@ class CaseTransformer(TransformerMixin, BaseEstimator):
         return state
 
     @staticmethod
-    def _move_cache(cache, device):
+    def _move_cache(cache, device, *, layer_devices=None):
         def move(value):
             if isinstance(value, torch.Tensor):
-                return value.to(device)
+                return value.to(destination)
             if isinstance(value, torch.device):
-                return torch.device(device)
+                return torch.device(destination)
             return value
 
-        for item in [cache, *cache.layers]:
+        for index, item in enumerate([cache, *cache.layers]):
+            destination = device if layer_devices is None else layer_devices.get(index - 1, device)
             for name, value in vars(item).items():
                 # Hybrid attention caches also store tensors inside recurrent-state dictionaries.
                 setattr(item, name, tree_map(move, value))
         return cache
 
+    def _cache_layer_devices(self):
+        """Resolve cache placement from the reloaded backbone and its offload hooks."""
+        modules = dict(self._model.named_modules())
+        indexed = {
+            module.layer_idx: (name, module)
+            for name, module in modules.items()
+            if isinstance(getattr(module, 'layer_idx', None), int)
+        }
+        # Some backbones index caches in their forward loop instead of their blocks.
+        blocks = [
+            (name, module)
+            for name, module in modules.items()
+            if type(module).__name__ in (self._model._no_split_modules or [])
+        ]
+        for index, block in enumerate(blocks):
+            indexed.setdefault(index, block)
+
+        devices = {}
+        for index in range(len(self._kv_cache.layers)):
+            if index not in indexed:
+                continue
+            name, module = indexed[index]
+            parameter = next(module.parameters(), None)
+            device = parameter.device if parameter is not None else self._device
+            # The nearest execution hook takes precedence over stored/offloaded weights.
+            while True:
+                hook = getattr(modules[name], '_hf_hook', None)
+                execution_device = next(
+                    (
+                        item.execution_device
+                        for item in reversed(getattr(hook, 'hooks', (hook,)))
+                        if getattr(item, 'execution_device', None) is not None
+                    ),
+                    None,
+                )
+                if execution_device is not None:
+                    device = torch.device(execution_device)
+                    break
+                if not name:
+                    break
+                name = name.rpartition('.')[0]
+            if device.type == 'meta':
+                raise ValueError(f'Cannot determine the execution device for cache layer {index}.')
+            devices[index] = device
+        return devices
+
     def _ensure_runtime(self):
         if self._model is None:
             self._setup_model()
             if self._kv_cache is not None:
-                self._move_cache(self._kv_cache, self._device)
+                self._move_cache(self._kv_cache, self._device, layer_devices=self._cache_layer_devices())
 
     def __sklearn_tags__(self):
         tags = super().__sklearn_tags__()
@@ -650,8 +697,7 @@ class CaseTransformer(TransformerMixin, BaseEstimator):
         """Return the stable output schema, including collision-free PCA names."""
         self._check_fitted()
         check_is_fitted(self, attributes=['pca_'])
-        if input_features is not None and list(input_features) != list(self._columns_):
-            raise ValueError('input_features must match the feature names seen during fit.')
+        _check_feature_names_in(self, input_features, generate_names=False)
         if self.append_original_features:
             return np.asarray(self._input_names_ + self.embedding_feature_names_.tolist(), dtype=object)
         return self.embedding_feature_names_.copy()
