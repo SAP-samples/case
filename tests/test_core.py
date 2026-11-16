@@ -50,6 +50,20 @@ def test_oversized_fixed_tokens_raise(tokenizer, with_header):
         )
 
 
+@pytest.mark.parametrize('with_header', [True, False])
+def test_sequence_limit_can_be_disabled_without_changing_cell_caps(tokenizer, with_header):
+    result = serialize_table(
+        'label',
+        tokenizer,
+        row=pd.Series({'feature': 'long text'}),
+        config=SerializationConfig(max_length=3, max_cell_tokens=3, with_header=with_header),
+        enforce_max_length=False,
+    )
+    expected = ('fea    <bos>label\n' if with_header else '') + 'lon    <bos>'
+    assert tokenizer.decode(result['input_ids']) == expected
+    assert len(result['input_ids']) > 3
+
+
 def test_unlabeled_context_and_empty_schema_table(tokenizer):
     X = pd.DataFrame({'job': ['doctor', 'artist']})
     context = serialize_table('target', tokenizer, retrieval_table=X)

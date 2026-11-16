@@ -56,9 +56,12 @@ def serialize_table(
     retrieval_table: pd.DataFrame | None = None,
     retrieval_targets: pd.Series | None = None,
     config: SerializationConfig | None = None,
+    *,
+    enforce_max_length: bool = True,
 ) -> Dict[str, List[int]]:
     """Serializes a primary row and historical retrieval rows into a single, flat
-    sequence of token IDs, bounded tightly by a maximum token budget.
+    sequence of token IDs. Setting enforce_max_length=False allows the header and
+    query to exceed max_length; cell caps and context packing still apply.
     """
     # Fallback to default configuration if none provided
     if config is None:
@@ -107,7 +110,7 @@ def serialize_table(
         query_row_tokens.extend(tokenizer('')['input_ids'])
 
     fixed_token_budget = len(header_tokens) + len(query_row_tokens)
-    if fixed_token_budget > config.max_length:
+    if enforce_max_length and fixed_token_budget > config.max_length:
         raise ValueError(
             f'Header and query require {fixed_token_budget} tokens, exceeding max_length={config.max_length}. '
             'Increase max_length or reduce max_cell_tokens.'

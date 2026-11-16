@@ -108,6 +108,8 @@ def make_transformer(monkeypatch):
         device = kwargs['device_map'] if kwargs['device_map'] != 'auto' else 'cpu'
         model.to(device=device, dtype=kwargs['dtype'])
         model.set_attn_implementation(kwargs['attn_implementation'])
+        if kwargs.get('output_loading_info'):
+            return model, {'missing_keys': [], 'unexpected_keys': [], 'mismatched_keys': [], 'error_msgs': []}
         return model
 
     loader = Mock(side_effect=load_model)

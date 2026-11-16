@@ -168,14 +168,16 @@ and `transform(X_test)` for evaluation. Calling `transform(X_train)` or
 own rows, so it differs from cross-fitted training features. Keep the entire
 transformer inside each evaluation fold or scikit-learn pipeline.
 
-`max_length` is a hard limit on the **complete context plus query**. The transformer
-reserves up to `max_cell_tokens` tokens per query cell (default 50), separators,
-and the checkpoint's final pooling token before packing context rows. This keeps
-context fixed across batches and accommodates future cells up to the same cap.
-If the header and reserved query cannot fit, increase `max_length` or reduce
-`max_cell_tokens`. Context rows are dropped whole when the remaining budget is
-full; oversized fixed sequences raise an error. The configured length must also
-fit the model's context window.
+`max_length` is the budget for packing the **header and context rows**. Context
+rows are included whole, up to that budget and `num_context_rows`. Each query row
+is then serialized and added to the fitted context. Feature cells remain capped
+at `max_cell_tokens` (default 50). Queries are serialized batch by batch during
+training and inference. If context plus an embedding batch exceeds `max_length`,
+CASE logs a warning and attempts inference with the full capped queries. It does
+not rebuild context or further truncate query values. The model may still reject
+sequences beyond its supported capacity; those errors propagate. The header must
+fit `max_length`, and the configured context budget must fit the model's context
+window.
 
 Targets can be pandas Series, NumPy arrays, lists, or omitted. They must be
 one-dimensional and match the number of training rows. With `y=None`, context
@@ -200,6 +202,12 @@ without a vocabulary head and retains only final hidden states during inference.
 
 CASE loads only the text backbone, including when the checkpoint stores text
 weights inside a wrapper. No vision tower or image projector is constructed.
+Nested text configurations are supported with standard `language_model` or
+`text_model` weight prefixes; loading fails if required text weights are missing.
+Text attention must be causal. Gemma4's `use_bidirectional_attention="vision"`
+is supported for text-only inputs; `"all"` and fully bidirectional modes are rejected.
+Native tests cover GPT-2, Llama, Qwen2, Qwen3, Qwen3.5's hybrid attention, and
+Gemma4's shared KV state, per-layer embeddings, and MoE blocks using tiny checkpoints.
 Use `device="cpu"` or `device="cuda"` to require a particular device; the default
 `device="auto"` retains automatic placement. Changing the device requires refitting.
 With `attn_implementation=None`, CPU placement uses SDPA. Automatic or CUDA

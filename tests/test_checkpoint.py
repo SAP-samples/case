@@ -61,7 +61,7 @@ def test_case_checkpoint_end_to_end(torch_device):
         assert train_features.index.equals(X_train.index)
         assert np.isfinite(train_features.to_numpy()).all()
         cache_length = transformer._kv_cache.get_seq_length()
-        assert cache_length + transformer._query_budget_ <= transformer.max_length
+        assert cache_length <= transformer.max_length
         print(f'Fit completed in {fit_seconds:.1f}s; context={cache_length} tokens.', flush=True)
 
         raw = transformer.embed(X_test)

@@ -1,5 +1,6 @@
 import copy
 import importlib.util
+import logging
 from unittest.mock import patch
 
 import numpy as np
@@ -225,25 +226,66 @@ def test_arrays_nonstring_names_and_empty_transform(make_transformer, data):
     assert make_transformer().fit_transform(named, y).columns.is_unique
 
 
-def test_total_token_budget_and_long_future_queries(make_transformer, data):
+def test_context_token_budget_and_long_future_queries(make_transformer, data, caplog):
     X, y = data
-    tr = make_transformer(max_length=100, max_cell_tokens=4).fit(X, y)
+    tr = make_transformer(max_length=110, max_cell_tokens=4).fit(X, y)
     observed = []
 
     def check_length(model, args, kwargs):
-        length = kwargs['past_key_values'].get_seq_length() + kwargs['input_ids'].shape[1]
-        observed.append(length)
-        assert length <= 100
+        context_length = kwargs['past_key_values'].get_seq_length()
+        observed.append(kwargs['input_ids'].shape[1])
+        assert context_length == tr._kv_cache.get_seq_length()
+        assert context_length <= tr.max_length
 
     h = tr._model.register_forward_pre_hook(check_length, with_kwargs=True)
-    tr.transform(X.assign(job=['a' * 100] * len(X), age=['b' * 100] * len(X)))
+    with caplog.at_level(logging.WARNING, logger='case.embedding'):
+        tr.transform(X.assign(job=['a' * 100] * len(X), age=['b' * 100] * len(X)))
     h.remove()
     assert observed
-    assert tr._kv_cache.get_seq_length() + tr._query_budget_ <= tr.max_length
+    assert all(query_length <= 17 for query_length in observed)
+    assert tr._kv_cache.get_seq_length() + max(observed) > tr.max_length
+    assert 'exceeding max_length=110' in caplog.text
     with pytest.raises(ValueError, match='max_length'):
         make_transformer(max_length=20).fit(X, y)
     with pytest.raises(ValueError, match='model context limit'):
         make_transformer(max_length=20000).fit(X, y)
+
+
+def test_query_larger_than_context_budget_keeps_cell_cap(make_transformer, data, caplog):
+    X, y = data
+    tr = make_transformer(max_length=32, max_cell_tokens=50).fit(X, y)
+    future = X.iloc[:1].assign(job='x' * 100, age='y' * 100)
+    saved_cache = tr._kv_cache
+    caplog.clear()
+    with (
+        patch.object(tr, '_prefill_kv', wraps=tr._prefill_kv) as prefill,
+        patch.object(tr._model, 'forward', wraps=tr._model.forward) as forward,
+        caplog.at_level(logging.WARNING, logger='case.embedding'),
+    ):
+        raw = tr.embed(future)
+    # Two 50-token cells, two four-token separators, and the pooling token.
+    assert forward.call_args.kwargs['input_ids'].shape[1] == 109 > tr.max_length
+    assert raw.shape == (1, 32) and np.isfinite(raw).all()
+    prefill.assert_not_called()
+    assert tr._kv_cache is saved_cache
+    messages = [record.message for record in caplog.records if record.name == 'case.embedding']
+    assert len(messages) == 1
+    assert 'Attempting inference with the fitted context' in messages[0]
+
+
+def test_backend_error_propagates_after_overflow_warning(make_transformer, data, caplog):
+    X, y = data
+    tr = make_transformer(max_length=32, max_cell_tokens=50).fit(X, y)
+    future = X.iloc[:1].assign(job='x' * 100, age='y' * 100)
+    caplog.clear()
+    with (
+        patch.object(tr._model, 'forward', side_effect=RuntimeError('Backend sequence limit exceeded.')) as forward,
+        caplog.at_level(logging.WARNING, logger='case.embedding'),
+        pytest.raises(RuntimeError, match='Backend sequence limit'),
+    ):
+        tr.embed(future)
+    forward.assert_called_once()
+    assert 'Attempting inference with the fitted context' in caplog.text
 
 
 def test_only_backbone_output_and_compact_cache(make_transformer, data, torch_device):
@@ -363,7 +405,7 @@ def test_cpu_model_uses_sdpa_when_cuda_and_flash_are_available(make_transformer,
     assert output.shape == (4, 5)
 
 
-@pytest.mark.parametrize('checkpoint_layout', ['text', 'case'])
+@pytest.mark.parametrize('checkpoint_layout', ['text', 'case', 'case_with_vision'])
 def test_loading_saved_language_model_as_backbone(
     tmp_path, monkeypatch, tokenizer, data, torch_device, checkpoint_layout
 ):
@@ -388,13 +430,18 @@ def test_loading_saved_language_model_as_backbone(
     config._attn_implementation = 'sdpa'
     source = Gemma3ForCausalLM(config).eval()
     source.save_pretrained(tmp_path)
-    if checkpoint_layout == 'case':
+    if checkpoint_layout.startswith('case'):
         # Exercise CASE's on-disk text-weight layout without constructing image modules.
         (tmp_path / 'config.json').write_text(json.dumps({'model_type': 'gemma3', 'text_config': config.to_dict()}))
-        save_file(
-            {f'language_model.model.{key}': weight for key, weight in source.model.state_dict().items()},
-            tmp_path / 'model.safetensors',
-        )
+        weights = {f'language_model.model.{key}': weight for key, weight in source.model.state_dict().items()}
+        if checkpoint_layout == 'case_with_vision':
+            weights.update(
+                {
+                    'vision_tower.vision_model.embeddings.patch_embedding.weight': torch.zeros(2, 2),
+                    'multi_modal_projector.mm_input_projection_weight': torch.zeros(2, 2),
+                }
+            )
+        save_file(weights, tmp_path / 'model.safetensors')
     monkeypatch.setattr('case.embedding.AutoTokenizer.from_pretrained', lambda *args, **kwargs: tokenizer)
     tr = CaseTransformer(
         model_name=str(tmp_path),
@@ -415,6 +462,34 @@ def test_loading_saved_language_model_as_backbone(
         assert loaded_weights[key].device.type == torch_device
         torch.testing.assert_close(loaded_weights[key].cpu(), weight.cpu(), rtol=0, atol=0)
     assert not hasattr(tr._model, 'lm_head')
+    if checkpoint_layout == 'case_with_vision':
+        from case.embedding import _CaseGemma3TextModel
+
+        _, info = _CaseGemma3TextModel.from_pretrained(
+            tmp_path,
+            config=config,
+            dtype=torch.float32,
+            key_mapping={r'^language_model\.model\.': ''},
+            output_loading_info=True,
+        )
+        assert not info['unexpected_keys']
+        assert not info['missing_keys']
+        assert not info['mismatched_keys']
+
+        # Unexpected or missing text weights must remain visible.
+        weights['language_model.model.unrecognized.weight'] = torch.zeros(2)
+        del weights['language_model.model.norm.weight']
+        save_file(weights, tmp_path / 'model.safetensors')
+        _, info = _CaseGemma3TextModel.from_pretrained(
+            tmp_path,
+            config=config,
+            dtype=torch.float32,
+            key_mapping={r'^language_model\.model\.': ''},
+            output_loading_info=True,
+        )
+        assert 'unrecognized.weight' in info['unexpected_keys']
+        assert 'norm.weight' in info['missing_keys']
+        assert not any(key.startswith(('vision_tower.', 'multi_modal_projector.')) for key in info['unexpected_keys'])
 
 
 def test_direct_parameter_mutation_requires_refit(make_transformer, data):

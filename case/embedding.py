@@ -2,6 +2,7 @@ import copy
 import importlib.util
 import logging
 import random
+import time
 
 import numpy as np
 import pandas as pd
@@ -11,13 +12,23 @@ from sklearn.decomposition import PCA
 from sklearn.model_selection import KFold
 from sklearn.preprocessing import normalize
 from sklearn.utils.validation import check_is_fitted
+from torch.utils._pytree import tree_map
 from tqdm import tqdm
-from transformers import AutoConfig, AutoModel, AutoTokenizer, DynamicCache
+from transformers import AutoConfig, AutoModel, AutoTokenizer, DynamicCache, Gemma3TextModel
 
 from case.config import SerializationConfig
 from case.core import serialize_table
 
 logger = logging.getLogger(__name__)
+
+
+class _CaseGemma3TextModel(Gemma3TextModel):
+    """Load CASE's text backbone, excluding unused image keys from the report."""
+
+    _keys_to_ignore_on_load_unexpected = [
+        *(Gemma3TextModel._keys_to_ignore_on_load_unexpected or []),
+        r'^(?:model\.)?(?:vision_tower|multi_modal_projector)\.',
+    ]
 
 
 def _resolve_attn_implementation(device: str = 'auto') -> str:
@@ -26,6 +37,19 @@ def _resolve_attn_implementation(device: str = 'auto') -> str:
     if use_cuda and torch.cuda.is_available() and importlib.util.find_spec('flash_attn') is not None:
         return 'flash_attention_2'
     return 'sdpa'
+
+
+def _validate_text_attention(config):
+    """Require causal text attention while allowing vision-only bidirectional modes."""
+    bidirectional = getattr(config, 'use_bidirectional_attention', False)
+    if (
+        bidirectional not in (None, False, 'vision')
+        or getattr(config, 'is_causal', True) is False
+        or getattr(config, 'is_encoder_decoder', False)
+    ):
+        raise ValueError(
+            'Context caching requires a causal text model, not bidirectional or encoder-decoder attention.'
+        )
 
 
 def _unique_names(names):
@@ -57,12 +81,14 @@ class CaseTransformer(TransformerMixin, BaseEstimator):
 
     Attributes:
         model_name (str): Identifier or local path of the Hugging Face transformer backbone.
-            Defaults to "SAP/CASE". Only causal text backbones are supported; CASE's wrapped
-            checkpoint is loaded as a text model, without a vision tower or vocabulary output head.
-        max_length (int): Maximum combined token budget for the serialized header, context rows,
-            and query row. Must not exceed the backbone's context limit. Space is reserved for
-            a query with up to `max_cell_tokens` tokens per feature, plus separators and the
-            pooling token. A header and reserved query that cannot fit raise ValueError.
+            Defaults to "SAP/CASE". Causal text backbones can be loaded directly or from
+            checkpoints with a nested text configuration and standard text-weight prefixes.
+            No vision tower or vocabulary output head is loaded.
+        max_length (int): Token budget for the serialized header and context rows.
+            Must not exceed the backbone's context limit. Query rows are added afterward
+            with the per-cell cap. If context plus query exceeds this budget, a warning
+            is logged and inference is attempted using the fitted context. A header
+            that cannot fit raises ValueError.
             Defaults to 16,000.
         num_context_rows (int): Maximum number of training rows sampled without replacement
             for in-context serialization. Fewer rows may be used to fit the token budget;
@@ -97,8 +123,8 @@ class CaseTransformer(TransformerMixin, BaseEstimator):
             collisions. All output column names are unique strings. Defaults to True.
         max_cell_tokens (int): Maximum tokens retained per feature value or feature-column
             name during serialization. Separators, target values, and the target-column name
-            are outside this per-cell cap but count toward `max_length`. Also determines
-            the space reserved for future query rows. Defaults to 50.
+            are outside this per-cell cap. All context tokens count toward `max_length`;
+            query rows are added afterward. Defaults to 50.
         context_cv (int): Number of folds for optional supervised cross-fitting. The default,
             1, disables cross-fitting and builds context once. Values greater than 1 enable
             cross-fitting only when `y` is provided and `num_context_rows` is positive.
@@ -108,7 +134,10 @@ class CaseTransformer(TransformerMixin, BaseEstimator):
             "auto" delegates placement to the model loader. Explicit CUDA placement raises
             ValueError if CUDA is unavailable. Changing this setting requires refitting.
             Defaults to "auto".
-        pca_ (PCA): Fitted PCA projection, available after successful fitting.
+        model_revision (str | None): Checkpoint commit, tag, or branch used by the model
+            loader. None uses the repository default. A resolved commit is retained for
+            restoring saved fitted state. Local checkpoint paths must remain available.
+        pca_ (PCA): Fitted PCA projection, available after fit or fit_transform.
         n_features_in_ (int): Number of input features seen during fitting.
         feature_names_in_ (numpy.ndarray): Input feature names in fitted order. Present
             only when all input column names are strings.
@@ -130,6 +159,11 @@ class CaseTransformer(TransformerMixin, BaseEstimator):
         (n_samples, hidden_dim), optionally normalized, without PCA or appended features.
         Both inference methods accept empty tables with the fitted schema.
 
+        `fit_embed(X, y)` fits context and returns raw training embeddings with the
+        same cross-fitting semantics as `fit_transform`, without fitting PCA. Consumers
+        fit their own projection on those training embeddings and use `embed` for
+        inference. `transform` requires a projection fitted by `fit` or `fit_transform`.
+
         With cross-fitting enabled, each training row is embedded using context drawn
         only from other folds, and PCA is fitted on those embeddings. A final inference
         context is then sampled from all training rows. For k folds, this requires k + 1
@@ -144,6 +178,16 @@ class CaseTransformer(TransformerMixin, BaseEstimator):
         and device settings are unchanged. Changing any parameter except `batch_size`
         or `append_original_features` requires refitting before inference. A failed fit
         clears the fitted state.
+
+        Pickling saves context, schema, and PCA while referencing the pretrained
+        checkpoint. Backbone weights and the tokenizer reload lazily on first inference.
+
+        The header and context rows are packed under max_length. Query rows are
+        serialized batch by batch and added to the fitted context, with each feature
+        cell capped at max_cell_tokens. If context plus a query exceeds max_length,
+        a warning is logged and inference is attempted with the same context. The
+        model may reject sequences beyond its supported capacity; those errors
+        propagate to the caller.
     """
 
     def __init__(
@@ -162,6 +206,7 @@ class CaseTransformer(TransformerMixin, BaseEstimator):
         max_cell_tokens: int = 50,
         context_cv: int = 1,
         device: str = 'auto',
+        model_revision: str | None = None,
     ):
         self.model_name = model_name
         self.max_length = max_length
@@ -177,6 +222,7 @@ class CaseTransformer(TransformerMixin, BaseEstimator):
         self.max_cell_tokens = max_cell_tokens
         self.context_cv = context_cv
         self.device = device
+        self.model_revision = model_revision
         self._model = None
         self._tokenizer = None
         self._device = None
@@ -186,6 +232,35 @@ class CaseTransformer(TransformerMixin, BaseEstimator):
 
     def __sklearn_is_fitted__(self):
         return self._is_fitted
+
+    def __getstate__(self):
+        """Save fitted state without another copy of the pretrained backbone."""
+        state = super().__getstate__().copy()
+        state.update(_model=None, _tokenizer=None, _device=None, _model_signature=None)
+        if self._kv_cache is not None:
+            state['_kv_cache'] = self._move_cache(copy.deepcopy(self._kv_cache), 'cpu')
+        return state
+
+    @staticmethod
+    def _move_cache(cache, device):
+        def move(value):
+            if isinstance(value, torch.Tensor):
+                return value.to(device)
+            if isinstance(value, torch.device):
+                return torch.device(device)
+            return value
+
+        for item in [cache, *cache.layers]:
+            for name, value in vars(item).items():
+                # Hybrid attention caches also store tensors inside recurrent-state dictionaries.
+                setattr(item, name, tree_map(move, value))
+        return cache
+
+    def _ensure_runtime(self):
+        if self._model is None:
+            self._setup_model()
+            if self._kv_cache is not None:
+                self._move_cache(self._kv_cache, self._device)
 
     def __sklearn_tags__(self):
         tags = super().__sklearn_tags__()
@@ -206,9 +281,9 @@ class CaseTransformer(TransformerMixin, BaseEstimator):
             '_columns_',
             '_input_names_',
             'embedding_feature_names_',
-            '_query_budget_',
-            '_context_budget_',
             '_fit_parameters_',
+            'embedding_fit_time_',
+            'pca_fit_time_',
         ):
             self.__dict__.pop(name, None)
 
@@ -242,6 +317,8 @@ class CaseTransformer(TransformerMixin, BaseEstimator):
             raise ValueError('random_state must be None or an integer in [0, 2**32).')
         if not isinstance(self.model_name, str) or not self.model_name:
             raise ValueError('model_name must be a non-empty string.')
+        if self.model_revision is not None and (not isinstance(self.model_revision, str) or not self.model_revision):
+            raise ValueError('model_revision must be None or a non-empty string.')
         if not isinstance(self.dtype, torch.dtype) or not self.dtype.is_floating_point:
             raise ValueError('dtype must be a floating-point torch.dtype.')
         if self.attn_implementation is not None and not isinstance(self.attn_implementation, str):
@@ -292,32 +369,50 @@ class CaseTransformer(TransformerMixin, BaseEstimator):
     def _setup_model(self):
         """Load the backbone without its vocabulary head, reusing identical weights."""
         attention = self.attn_implementation or _resolve_attn_implementation(self.device)
-        signature = (self.model_name, self.dtype, attention, self.device)
+        signature = (self.model_name, self.model_revision, self.dtype, attention, self.device)
         if self._model is not None and self._model_signature == signature:
             return
         self._model = self._tokenizer = self._device = None
         self._model_signature = None
-        tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        config = AutoConfig.from_pretrained(self.model_name)
+        source = (self.model_name, self.model_revision)
+        revision = self.model_revision
+        if getattr(self, '_checkpoint_source_', None) == source:
+            revision = getattr(self, '_checkpoint_revision_', None) or revision
+        revision_kwargs = {'revision': revision} if revision is not None else {}
+        config = AutoConfig.from_pretrained(self.model_name, **revision_kwargs)
         text_config = config.get_text_config()
+        _validate_text_attention(text_config)
+        if getattr(config, 'is_encoder_decoder', False):
+            raise ValueError('Context caching requires a causal text model, not an encoder-decoder wrapper.')
+        tokenizer = AutoTokenizer.from_pretrained(self.model_name, **revision_kwargs)
         load_kwargs = {}
+        model_loader = AutoModel
+        if text_config is not config:
+            # Strip common wrapper paths when loading only the text backbone. Transformers
+            # still handles the backbone's own base-model prefix and weight conversions.
+            load_kwargs['key_mapping'] = {r'^(?:model\.)?(?:language_model|text_model)(?:\.model)?\.': ''}
         if config.model_type == 'gemma3':
-            # CASE checkpoints wrap the text weights; extract them without a vision tower.
-            load_kwargs['key_mapping'] = {r'^(?:language_model\.model|model\.language_model)\.': ''}
-        elif text_config is not config:
-            raise ValueError('Only text models and the CASE text checkpoint are supported.')
+            model_loader = _CaseGemma3TextModel
         # Load only the backbone: per-token vocabulary logits are unused and can consume several GiB.
-        model = AutoModel.from_pretrained(
+        model, loading_info = model_loader.from_pretrained(
             self.model_name,
             config=text_config,
             device_map=self.device,
             dtype=self.dtype,
             attn_implementation=attention,
+            output_loading_info=True,
+            **revision_kwargs,
             **load_kwargs,
         )
+        for issue in ('missing_keys', 'mismatched_keys', 'error_msgs'):
+            if loading_info.get(issue):
+                details = sorted(map(str, loading_info[issue]))[:5]
+                raise ValueError(
+                    f'Text backbone weights were not loaded completely ({issue}: {details}). '
+                    'Check the checkpoint text configuration and weight prefixes.'
+                )
         model.eval()
-        if getattr(model.config.get_text_config(), 'use_bidirectional_attention', False):
-            raise ValueError('Context caching requires a causal model, not bidirectional attention.')
+        _validate_text_attention(model.config.get_text_config())
         if tokenizer.pad_token is None:
             if tokenizer.eos_token is None:
                 raise ValueError('The tokenizer must provide a padding or EOS token.')
@@ -330,39 +425,23 @@ class CaseTransformer(TransformerMixin, BaseEstimator):
                 raise ValueError('Cannot determine the execution device for the offloaded input embeddings.')
         self._tokenizer, self._model, self._device = tokenizer, model, device
         self._model_signature = signature
+        self._checkpoint_source_ = source
+        self._checkpoint_revision_ = getattr(config, '_commit_hash', None) or revision
 
-    def _serialization_config(self, *, with_header, max_length=None):
+    def _serialization_config(self, *, with_header):
         return SerializationConfig(
-            max_length=self.max_length if max_length is None else max_length,
+            max_length=self.max_length,
             max_cell_tokens=self.max_cell_tokens,
             scientific_notation=self.scientific_notation,
             with_header=with_header,
         )
 
-    def _set_token_budgets(self, X):
+    def _prefill_kv(self, X, y=None):
+        """Pack context under max_length and build its cache, including a header."""
         text_config = self._model.config.get_text_config()
         model_limit = getattr(text_config, 'max_position_embeddings', None)
         if model_limit is not None and self.max_length > model_limit:
             raise ValueError(f'max_length exceeds the model context limit of {model_limit} tokens.')
-        config = self._serialization_config(with_header=True)
-        header = serialize_table(
-            self.target_column_name_,
-            self._tokenizer,
-            retrieval_table=X.iloc[:0],
-            config=config,
-        )['input_ids']
-        separator_length = len(self._tokenizer(config.cell_separator, add_special_tokens=False)['input_ids'])
-        pooling_length = len(self._tokenizer('')['input_ids'])
-        self._query_budget_ = self.n_features_in_ * (self.max_cell_tokens + separator_length) + pooling_length
-        self._context_budget_ = self.max_length - self._query_budget_
-        if self._context_budget_ < len(header):
-            raise ValueError(
-                'max_length cannot fit the header and reserved query tokens. '
-                'Increase max_length or reduce max_cell_tokens.'
-            )
-
-    def _prefill_kv(self, X, y=None):
-        """Build a fresh context cache, including a header when no examples are used."""
         rng = random.Random(None if self.random_state is None else int(self.random_state))
         indices = rng.sample(range(len(X)), min(len(X), self.num_context_rows))
         context = X.iloc[indices]
@@ -372,7 +451,7 @@ class CaseTransformer(TransformerMixin, BaseEstimator):
             tokenizer=self._tokenizer,
             retrieval_table=context,
             retrieval_targets=targets,
-            config=self._serialization_config(with_header=True, max_length=self._context_budget_),
+            config=self._serialization_config(with_header=True),
         )
         self._kv_cache = None
         input_ids = torch.tensor([inputs['input_ids']], dtype=torch.long, device=self._device)
@@ -399,26 +478,40 @@ class CaseTransformer(TransformerMixin, BaseEstimator):
     def _prepare_batch_kv(self, batch_size):
         batch_cache = copy.deepcopy(self._kv_cache)
         if batch_size > 1:
-            batch_cache.batch_repeat_interleave(batch_size)
+            # Reordering supports both KV layers and hybrid recurrent/linear-attention states.
+            batch_cache.reorder_cache(torch.zeros(batch_size, dtype=torch.long))
         return batch_cache
 
     def _embed(self, X):
+        self._ensure_runtime()
         hidden_dim = self._model.config.get_text_config().hidden_size
         embeddings = np.empty((len(X), hidden_dim), dtype=np.float32)
-        config = self._serialization_config(with_header=False, max_length=self._query_budget_)
         context_length = self._kv_cache.get_seq_length()
+        config = self._serialization_config(with_header=False)
         for start in tqdm(range(0, len(X), self.batch_size), desc='Embedding batches'):
             rows = X.iloc[start : start + self.batch_size]
             inputs = [
-                serialize_table(self.target_column_name_, self._tokenizer, row=row, config=config)['input_ids']
+                serialize_table(
+                    self.target_column_name_,
+                    self._tokenizer,
+                    row=row,
+                    config=config,
+                    enforce_max_length=False,
+                )['input_ids']
                 for _, row in rows.iterrows()
             ]
             if any(not ids for ids in inputs):
                 raise ValueError('The tokenizer produced an empty query sequence.')
             padded = self._tokenizer.pad({'input_ids': inputs}, padding=True, return_tensors='pt')
             input_ids = padded['input_ids'].to(self._device)
-            if context_length + input_ids.shape[1] > self.max_length:
-                raise ValueError('Context plus query exceeds max_length.')
+            total_length = context_length + input_ids.shape[1]
+            if total_length > self.max_length:
+                logger.warning(
+                    'Context plus query requires %d tokens, exceeding max_length=%d. '
+                    'Attempting inference with the fitted context.',
+                    total_length,
+                    self.max_length,
+                )
             attention_mask = torch.cat(
                 [
                     torch.ones((len(rows), context_length), dtype=torch.long, device=self._device),
@@ -447,8 +540,9 @@ class CaseTransformer(TransformerMixin, BaseEstimator):
             embeddings = normalize(embeddings, norm='l2')
         return embeddings
 
-    def _fit(self, X, y):
+    def _fit(self, X, y, *, fit_pca=True):
         self._reset_fit()
+        started = time.perf_counter()
         try:
             self._validate_parameters()
             X = self._validate_X(X, fitting=True)
@@ -460,7 +554,6 @@ class CaseTransformer(TransformerMixin, BaseEstimator):
                 self.feature_names_in_ = X.columns.to_numpy(copy=True)
             self._input_names_ = _unique_names(X.columns.tolist())
             self.target_column_name_ = y.name if y is not None else 'target'
-            self._set_token_budgets(X)
             if y is not None and self.num_context_rows > 0 and self.context_cv > 1:
                 hidden_dim = self._model.config.get_text_config().hidden_size
                 raw = np.empty((len(X), hidden_dim), dtype=np.float32)
@@ -476,12 +569,16 @@ class CaseTransformer(TransformerMixin, BaseEstimator):
             else:
                 self._prefill_kv(X, y)
                 raw = self._embed(X)
-            effective_components = min(self.n_components, *raw.shape)
-            if effective_components < self.n_components:
-                logger.info('Lowering PCA components from %s to %s.', self.n_components, effective_components)
-            self.pca_ = PCA(n_components=effective_components, random_state=self.random_state).fit(raw)
-            all_names = _unique_names(self._input_names_ + [f'lm_pca_{i}' for i in range(effective_components)])
-            self.embedding_feature_names_ = np.asarray(all_names[self.n_features_in_ :], dtype=object)
+            self.embedding_fit_time_ = time.perf_counter() - started
+            pca_started = time.perf_counter()
+            if fit_pca:
+                effective_components = min(self.n_components, *raw.shape)
+                if effective_components < self.n_components:
+                    logger.info('Lowering PCA components from %s to %s.', self.n_components, effective_components)
+                self.pca_ = PCA(n_components=effective_components, random_state=self.random_state).fit(raw)
+                all_names = _unique_names(self._input_names_ + [f'lm_pca_{i}' for i in range(effective_components)])
+                self.embedding_feature_names_ = np.asarray(all_names[self.n_features_in_ :], dtype=object)
+            self.pca_fit_time_ = time.perf_counter() - pca_started if fit_pca else 0.0
             self._fit_parameters_ = self._fitting_parameters()
             self._is_fitted = True
             return X, raw
@@ -522,6 +619,15 @@ class CaseTransformer(TransformerMixin, BaseEstimator):
         frame, raw = self._fit(X, y)
         return self._output(frame, self.pca_.transform(raw))
 
+    def fit_embed(self, X, y=None):
+        """Fit context and return raw training embeddings, preserving cross-fitting.
+
+        PCA is not fitted. Use embed for inference embeddings and let the consumer
+        fit its projection on these training embeddings. Call fit or fit_transform
+        before using transform or get_feature_names_out.
+        """
+        return self._fit(X, y, fit_pca=False)[1]
+
     def embed(self, X):
         """Return raw (n_samples, hidden_dim) embeddings using the final fitted context.
 
@@ -534,6 +640,7 @@ class CaseTransformer(TransformerMixin, BaseEstimator):
     def transform(self, X):
         """Append PCA features for new rows using the final fitted context."""
         self._check_fitted()
+        check_is_fitted(self, attributes=['pca_'])
         frame = self._validate_X(X)
         raw = self._embed(frame)
         projected = self.pca_.transform(raw) if len(frame) else np.empty((0, self.pca_.n_components_))
@@ -542,6 +649,7 @@ class CaseTransformer(TransformerMixin, BaseEstimator):
     def get_feature_names_out(self, input_features=None):
         """Return the stable output schema, including collision-free PCA names."""
         self._check_fitted()
+        check_is_fitted(self, attributes=['pca_'])
         if input_features is not None and list(input_features) != list(self._columns_):
             raise ValueError('input_features must match the feature names seen during fit.')
         if self.append_original_features:
